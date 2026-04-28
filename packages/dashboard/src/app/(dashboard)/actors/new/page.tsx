@@ -156,31 +156,31 @@ export default function NewActorPage() {
             {'{'}
             {'\n'}
             {'  '}
-            <span className="text-cyan-400">"actorSpecification"</span>:{' '}
+            <span className="text-cyan-400">{'"actorSpecification"'}</span>:{' '}
             <span className="text-amber-400">1</span>,{'\n'}
             {'  '}
-            <span className="text-cyan-400">"name"</span>:{' '}
-            <span className="text-green-400">"my-actor"</span>,{'\n'}
+            <span className="text-cyan-400">{'"name"'}</span>:{' '}
+            <span className="text-green-400">{'"my-actor"'}</span>,{'\n'}
             {'  '}
-            <span className="text-cyan-400">"title"</span>:{' '}
-            <span className="text-green-400">"My Actor"</span>,{'\n'}
+            <span className="text-cyan-400">{'"title"'}</span>:{' '}
+            <span className="text-green-400">{'"My Actor"'}</span>,{'\n'}
             {'  '}
-            <span className="text-cyan-400">"description"</span>:{' '}
-            <span className="text-green-400">"Scrapes data from example.com"</span>,{'\n'}
+            <span className="text-cyan-400">{'"description"'}</span>:{' '}
+            <span className="text-green-400">{'"Scrapes data from example.com"'}</span>,{'\n'}
             {'  '}
-            <span className="text-cyan-400">"version"</span>:{' '}
-            <span className="text-green-400">"1.0.0"</span>,{'\n'}
+            <span className="text-cyan-400">{'"version"'}</span>:{' '}
+            <span className="text-green-400">{'"1.0.0"'}</span>,{'\n'}
             {'  '}
-            <span className="text-cyan-400">"dockerfile"</span>:{' '}
-            <span className="text-green-400">"./Dockerfile"</span>,{'\n'}
+            <span className="text-cyan-400">{'"dockerfile"'}</span>:{' '}
+            <span className="text-green-400">{'"./Dockerfile"'}</span>,{'\n'}
             {'  '}
-            <span className="text-cyan-400">"defaultRunOptions"</span>: {'{'}
+            <span className="text-cyan-400">{'"defaultRunOptions"'}</span>: {'{'}
             {'\n'}
             {'    '}
-            <span className="text-cyan-400">"memory"</span>:{' '}
+            <span className="text-cyan-400">{'"memory"'}</span>:{' '}
             <span className="text-amber-400">1024</span>,{'\n'}
             {'    '}
-            <span className="text-cyan-400">"timeout"</span>:{' '}
+            <span className="text-cyan-400">{'"timeout"'}</span>:{' '}
             <span className="text-amber-400">3600</span>
             {'\n'}
             {'  '}
@@ -213,7 +213,7 @@ export default function NewActorPage() {
             {'\n'}
             <span className="text-green-400">✓</span> Reading .actor/actor.json...{'\n'}
             <span className="text-green-400">✓</span> Building Docker image...{'\n'}
-            <span className="text-green-400">✓</span> Registering actor "your-actor"...{'\n'}
+            <span className="text-green-400">✓</span> Registering actor {'"your-actor"'}...{'\n'}
             <span className="text-green-400">✓</span> Done! View at
             http://localhost:3001/actors/your-actor
           </CodeBlock>

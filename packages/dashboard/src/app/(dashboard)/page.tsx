@@ -172,7 +172,7 @@ export default function Dashboard() {
                   No recent activity found.
                 </div>
               ) : (
-                recentRuns.map((run, _i) => (
+                recentRuns.map((run) => (
                   <div
                     key={run.id}
                     className="group flex items-center justify-between p-3 rounded-lg hover:bg-white/5 transition-colors border border-transparent hover:border-white/5"

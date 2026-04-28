@@ -26,6 +26,16 @@ import { getDataset, getDatasetItems, deleteDataset, type Dataset } from '@/lib/
 import { AppLink } from '@/components/app-link';
 import { prefixPath } from '@/lib/path-prefix';
 
+function formatCellValue(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'object') return JSON.stringify(value);
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'bigint') return value.toString();
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  // symbol/function — not expected in JSON-derived dataset items.
+  return '';
+}
+
 function DatasetDetailContent() {
   const params = useParams();
   const searchParams = useSearchParams(); // Use useSearchParams for query params
@@ -35,7 +45,7 @@ function DatasetDetailContent() {
   const limitParam = searchParams.get('limit');
 
   const [dataset, setDataset] = useState<Dataset | null>(null);
-  const [items, setItems] = useState<any[]>([]);
+  const [items, setItems] = useState<Record<string, unknown>[]>([]);
   const [loading, setLoading] = useState(true);
   const [itemsLoading, setItemsLoading] = useState(true);
   const [totalItems, setTotalItems] = useState(0);
@@ -280,7 +290,7 @@ function DatasetDetailContent() {
                               key={key}
                               className="max-w-[200px] truncate text-xs text-zinc-400 group-hover:text-zinc-200"
                             >
-                              {typeof value === 'object' ? JSON.stringify(value) : String(value)}
+                              {formatCellValue(value)}
                             </TableCell>
                           );
                         })}
