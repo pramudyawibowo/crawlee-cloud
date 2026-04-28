@@ -19,6 +19,7 @@ import { usersRoutes } from './routes/users.js';
 import { webhooksRoutes } from './routes/webhooks.js';
 import { schedulesRoutes } from './routes/schedules.js';
 import { scalerRoutes } from './routes/scaler.js';
+import { requireAdmin } from './auth/middleware.js';
 import { setupAdminUser } from './setup.js';
 import { initScheduler } from './scheduler.js';
 import { initScaler } from './scaler/index.js';
@@ -151,10 +152,16 @@ app.get('/health', () => ({
   version: process.env.npm_package_version ?? '1.0.0',
 }));
 
-// Prometheus metrics endpoint
-app.get('/metrics', async (_request, reply) => {
-  reply.header('Content-Type', registry.contentType);
-  return registry.metrics();
+// Prometheus metrics endpoint - admin-only to avoid public process recon.
+// Wrapped in an encapsulated plugin so `addHook('preHandler', requireAdmin)`
+// applies only here. Kept at root path so existing Prometheus scrape configs
+// keep working.
+await app.register(async (instance) => {
+  instance.addHook('preHandler', requireAdmin);
+  instance.get('/metrics', async (_request, reply) => {
+    reply.header('Content-Type', registry.contentType);
+    return registry.metrics();
+  });
 });
 
 async function start() {
