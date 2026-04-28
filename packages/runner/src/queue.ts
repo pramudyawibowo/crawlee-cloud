@@ -183,8 +183,12 @@ async function processRun(run: RunJob): Promise<void> {
     if (actor.default_run_options?.image) {
       image = actor.default_run_options.image;
     } else if (config.imageRegistry) {
-      // Pull from configured registry (e.g. ghcr.io/org/repo/actor-name:latest)
-      image = `${config.imageRegistry}/${actor.name}:latest`;
+      // Pull from configured registry. The `actor-` prefix matches what
+      // `crc push` writes (see cli/src/commands/push.ts) — both the local
+      // (`crawlee-cloud/actor-NAME`) and GHCR (`ghcr.io/REPO/actor-NAME`)
+      // push paths use it. Without the prefix here, runners would 404 on
+      // every pull from a configured registry.
+      image = `${config.imageRegistry}/actor-${actor.name}:latest`;
     } else {
       // Local convention
       image = `crawlee-cloud/actor-${actor.name}:latest`;
