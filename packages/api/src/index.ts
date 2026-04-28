@@ -18,6 +18,7 @@ import { registryRoutes } from './routes/registry.js';
 import { usersRoutes } from './routes/users.js';
 import { webhooksRoutes } from './routes/webhooks.js';
 import { schedulesRoutes } from './routes/schedules.js';
+import { scalerRoutes } from './routes/scaler.js';
 import { setupAdminUser } from './setup.js';
 import { initScheduler } from './scheduler.js';
 import { initScaler } from './scaler/index.js';
@@ -139,6 +140,7 @@ await app.register(registryRoutes, { prefix: '/v2' });
 await app.register(usersRoutes, { prefix: '/v2' });
 await app.register(webhooksRoutes, { prefix: '/v2' });
 await app.register(schedulesRoutes, { prefix: '/v2' });
+await app.register(scalerRoutes, { prefix: '/v2' });
 
 // Health check routes (liveness + readiness)
 registerHealthRoutes(app);
@@ -148,12 +150,6 @@ app.get('/health', () => ({
   status: 'ok',
   version: process.env.npm_package_version ?? '1.0.0',
 }));
-
-// Scaler status endpoint
-app.get('/v2/scaler/status', async () => {
-  const { getScalerStatus } = await import('./scaler/index.js');
-  return { data: await getScalerStatus() };
-});
 
 // Prometheus metrics endpoint
 app.get('/metrics', async (_request, reply) => {
