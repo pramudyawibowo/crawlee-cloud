@@ -152,12 +152,25 @@ app.get('/health', () => ({
   version: process.env.npm_package_version ?? '1.0.0',
 }));
 
-// Prometheus metrics endpoint - admin-only to avoid public process recon.
-// Wrapped in an encapsulated plugin so `addHook('preHandler', requireAdmin)`
-// applies only here. Kept at root path so existing Prometheus scrape configs
-// keep working.
+// Prometheus metrics endpoint - admin-only by default to avoid public
+// process recon. Wrapped in an encapsulated plugin so the preHandler hook
+// applies only here. Kept at root path so existing Prometheus scrape
+// configs keep working.
+//
+// METRICS_PUBLIC=true is an opt-in escape hatch for self-hosted operators
+// running on a private network where cluster-internal scrapes can't pass
+// auth. In production we log a loud warning so it shows up in operator
+// logs/alerts.
 await app.register(async (instance) => {
-  instance.addHook('preHandler', requireAdmin);
+  if (!config.metricsPublic) {
+    instance.addHook('preHandler', requireAdmin);
+  } else if (config.nodeEnv === 'production') {
+    app.log.warn(
+      'METRICS_PUBLIC=true in production — GET /metrics is unauthenticated; ' +
+        'ensure the API is not reachable from untrusted networks.'
+    );
+  }
+
   instance.get('/metrics', async (_request, reply) => {
     reply.header('Content-Type', registry.contentType);
     return registry.metrics();

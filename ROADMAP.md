@@ -38,7 +38,7 @@ Priority: Run large scraping jobs reliably.
 
 Priority: Production-grade stability.
 
-- [x] **Metrics & monitoring** - Prometheus endpoints (`GET /metrics` with prom-client)
+- [x] **Metrics & monitoring** - Prometheus endpoints (`GET /metrics` with prom-client, admin-only)
 - [x] **Health checks** - Liveness (`/health/live`) and readiness (`/health/ready`) probes with DB, Redis, S3 checks
 - [x] **Graceful shutdown** - API server drains requests, runner waits for active containers (configurable timeout)
 - [x] **Run history retention** - CLI cleanup script with `--dry-run`, S3 + DB cleanup

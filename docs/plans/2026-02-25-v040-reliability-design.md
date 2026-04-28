@@ -6,7 +6,11 @@ Five features to make Crawlee Cloud production-grade: Prometheus metrics, enhanc
 
 ## 1. Prometheus Metrics
 
-Add `prom-client` to `packages/api`. Expose `GET /metrics` on the same Fastify server (unauthenticated).
+Add `prom-client` to `packages/api`. Expose `GET /metrics` on the same Fastify server.
+
+> **Auth note (post-v0.4.0):** `/metrics` was originally shipped unauthenticated. It is now gated behind `requireAdmin` to avoid leaking process internals and per-route counters publicly. Operators must configure their Prometheus scrape job with an admin-scoped JWT (preferred — O(1) verify) or admin API key (works, but each scrape triggers `bcrypt.compare` against every active key — see `packages/api/src/auth/middleware.ts`). Operators on a private network can opt out via `METRICS_PUBLIC=true`; in production this logs a startup warning. There is no equivalent flag for `/v2/scaler/status` — runner IPs and scaler config have no public use case.
+>
+> **Follow-up:** `validateApiKey` currently iterates all active API keys per request. For high-cadence Prometheus scrapes using API-key auth this is O(N) bcrypt per scrape. A small in-memory `Map<key, {userId, expiresAt}>` with a short TTL (~60s) would reduce this to O(1) without changing the security model. Not blocking, but worth doing before any deployment with >20 active API keys scraping `/metrics`.
 
 **Metrics collected:**
 

@@ -1,8 +1,10 @@
 /**
  * Scaler routes - operational endpoints for the auto-scaler.
  *
- * Admin-only because the response includes runner IPs, queue
- * depth, and scaler config — sensitive operational data.
+ * Always admin-only. The response includes runner IPs, cloud provider,
+ * queue depth, and scaler config — there is no use case where this should
+ * be public, so unlike /metrics there is no METRICS_PUBLIC-style escape
+ * hatch.
  */
 
 import type { FastifyPluginAsync } from 'fastify';
