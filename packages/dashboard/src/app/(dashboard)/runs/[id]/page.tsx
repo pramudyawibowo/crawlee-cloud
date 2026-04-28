@@ -73,6 +73,11 @@ function RunDetailContent() {
     return () => clearInterval(intervalId);
   }, [id]);
 
+  // TODO: refactor tab-data fetching to an onTabChange handler instead of
+  // an effect. The set-state-in-effect rule (React 19) is silenced for
+  // this file via an override in eslint.config.mjs — see comment there.
+  // Tracked as a follow-up after the lint cleanup unblocks CI.
+
   // Fetch input when tab changes to input (only if not fetched yet)
   useEffect(() => {
     if (activeTab === 'input' && input === undefined && !inputLoading) {
