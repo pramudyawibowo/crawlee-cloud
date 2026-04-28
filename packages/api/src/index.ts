@@ -18,6 +18,8 @@ import { registryRoutes } from './routes/registry.js';
 import { usersRoutes } from './routes/users.js';
 import { webhooksRoutes } from './routes/webhooks.js';
 import { schedulesRoutes } from './routes/schedules.js';
+import { scalerRoutes } from './routes/scaler.js';
+import { requireAdmin } from './auth/middleware.js';
 import { setupAdminUser } from './setup.js';
 import { initScheduler } from './scheduler.js';
 import { initScaler } from './scaler/index.js';
@@ -139,6 +141,7 @@ await app.register(registryRoutes, { prefix: '/v2' });
 await app.register(usersRoutes, { prefix: '/v2' });
 await app.register(webhooksRoutes, { prefix: '/v2' });
 await app.register(schedulesRoutes, { prefix: '/v2' });
+await app.register(scalerRoutes, { prefix: '/v2' });
 
 // Health check routes (liveness + readiness)
 registerHealthRoutes(app);
@@ -149,16 +152,29 @@ app.get('/health', () => ({
   version: process.env.npm_package_version ?? '1.0.0',
 }));
 
-// Scaler status endpoint
-app.get('/v2/scaler/status', async () => {
-  const { getScalerStatus } = await import('./scaler/index.js');
-  return { data: await getScalerStatus() };
-});
+// Prometheus metrics endpoint - admin-only by default to avoid public
+// process recon. Wrapped in an encapsulated plugin so the preHandler hook
+// applies only here. Kept at root path so existing Prometheus scrape
+// configs keep working.
+//
+// METRICS_PUBLIC=true is an opt-in escape hatch for self-hosted operators
+// running on a private network where cluster-internal scrapes can't pass
+// auth. In production we log a loud warning so it shows up in operator
+// logs/alerts.
+await app.register(async (instance) => {
+  if (!config.metricsPublic) {
+    instance.addHook('preHandler', requireAdmin);
+  } else if (config.nodeEnv === 'production') {
+    app.log.warn(
+      'METRICS_PUBLIC=true in production — GET /metrics is unauthenticated; ' +
+        'ensure the API is not reachable from untrusted networks.'
+    );
+  }
 
-// Prometheus metrics endpoint
-app.get('/metrics', async (_request, reply) => {
-  reply.header('Content-Type', registry.contentType);
-  return registry.metrics();
+  instance.get('/metrics', async (_request, reply) => {
+    reply.header('Content-Type', registry.contentType);
+    return registry.metrics();
+  });
 });
 
 async function start() {

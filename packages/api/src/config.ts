@@ -21,6 +21,12 @@ export interface Config {
   corsOrigins: string;
   adminEmail?: string;
   adminPassword?: string;
+
+  // SECURITY: opt-in escape hatch for self-hosted operators on private
+  // networks. Defaults to false (admin-only). When true, GET /metrics is
+  // unauthenticated — only safe behind a private network / VPN. There is
+  // intentionally no equivalent flag for /v2/scaler/status (runner IPs).
+  metricsPublic: boolean;
 }
 
 const isDevelopment = process.env.NODE_ENV !== 'production';
@@ -82,4 +88,6 @@ export const config: Config = {
   // Admin user (optional)
   adminEmail: envOptional('ADMIN_EMAIL'),
   adminPassword: envOptional('ADMIN_PASSWORD'),
+
+  metricsPublic: envBool('METRICS_PUBLIC', false),
 };
