@@ -1,6 +1,6 @@
 /**
  * API client for Crawlee Platform.
- * 
+ *
  * Handles authenticated requests to the backend API.
  */
 
@@ -65,35 +65,32 @@ function getToken(): string | null {
   return localStorage.getItem('token');
 }
 
-async function fetchApi<T>(
-  endpoint: string,
-  options: RequestInit = {}
-): Promise<T> {
+async function fetchApi<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const token = getToken();
-  
+
   const headers: HeadersInit = {
     'Content-Type': 'application/json',
     ...options.headers,
   };
-  
+
   if (token) {
     (headers as Record<string, string>)['Authorization'] = `Bearer ${token}`;
   }
-  
+
   const res = await fetch(`${API_URL}${endpoint}`, {
     ...options,
     headers,
   });
-  
+
   if (!res.ok) {
     const error = await res.json().catch(() => ({ error: { message: 'Request failed' } }));
     throw new Error(error.error?.message || 'Request failed');
   }
-  
+
   if (res.status === 204) {
     return {} as T;
   }
-  
+
   return res.json();
 }
 
@@ -108,11 +105,16 @@ export async function getApiKeys(): Promise<ApiKey[]> {
   return res.data;
 }
 
-export async function createApiKey(name: string): Promise<{ id: string; name: string; key: string }> {
-  const res = await fetchApi<{ data: { id: string; name: string; key: string } }>('/v2/auth/api-keys', {
-    method: 'POST',
-    body: JSON.stringify({ name }),
-  });
+export async function createApiKey(
+  name: string
+): Promise<{ id: string; name: string; key: string }> {
+  const res = await fetchApi<{ data: { id: string; name: string; key: string } }>(
+    '/v2/auth/api-keys',
+    {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    }
+  );
   return res.data;
 }
 
@@ -131,10 +133,13 @@ export async function getRun(id: string): Promise<Run> {
   return res.data;
 }
 
-export async function startRun(actorId: string, options?: { input?: unknown; timeout?: number; memory?: number }): Promise<Run> {
+export async function startRun(
+  actorId: string,
+  options?: { input?: unknown; timeout?: number; memory?: number }
+): Promise<Run> {
   const res = await fetchApi<{ data: Run }>(`/v2/acts/${actorId}/runs`, {
     method: 'POST',
-    body: JSON.stringify({ 
+    body: JSON.stringify({
       input: options?.input,
       timeout: options?.timeout,
       memory: options?.memory,
@@ -151,7 +156,7 @@ export async function abortRun(id: string): Promise<Run> {
 export async function getActorRuns(actorId: string): Promise<Run[]> {
   // Get all runs and filter by actId
   const runs = await getRuns();
-  return runs.filter(r => r.actId === actorId);
+  return runs.filter((r) => r.actId === actorId);
 }
 
 // Actors
@@ -192,14 +197,18 @@ export async function getDataset(id: string): Promise<Dataset> {
   return res.data;
 }
 
-export async function getDatasetItems(id: string, options?: { offset?: number; limit?: number }): Promise<unknown[]> {
+export async function getDatasetItems(
+  id: string,
+  options?: { offset?: number; limit?: number }
+): Promise<Record<string, unknown>[]> {
   const params = new URLSearchParams();
   if (options?.offset !== undefined) params.append('offset', String(options.offset));
   if (options?.limit !== undefined) params.append('limit', String(options.limit));
-  
+
   const queryString = params.toString() ? `?${params.toString()}` : '';
-  // API returns array directly, not wrapped in { data: ... }
-  const res = await fetchApi<unknown[]>(`/v2/datasets/${id}/items${queryString}`);
+  // API returns array directly, not wrapped in { data: ... }.
+  // Items are Apify-style dataset rows — always JSON objects, not scalars.
+  const res = await fetchApi<Record<string, unknown>[]>(`/v2/datasets/${id}/items${queryString}`);
   return res;
 }
 
@@ -208,13 +217,18 @@ export async function deleteDataset(id: string): Promise<void> {
 }
 
 // Stats (aggregated from other calls)
-export async function getRunLogs(runId: string, options?: { offset?: number; limit?: number }): Promise<{ items: { timestamp: string; level: string; message: string }[] }> {
+export async function getRunLogs(
+  runId: string,
+  options?: { offset?: number; limit?: number }
+): Promise<{ items: { timestamp: string; level: string; message: string }[] }> {
   const params = new URLSearchParams();
   if (options?.offset !== undefined) params.append('offset', String(options.offset));
   if (options?.limit !== undefined) params.append('limit', String(options.limit));
-  
+
   const queryString = params.toString() ? `?${params.toString()}` : '';
-  const res = await fetchApi<{ data: { items: { timestamp: string; level: string; message: string }[] } }>(`/v2/actor-runs/${runId}/logs${queryString}`);
+  const res = await fetchApi<{
+    data: { items: { timestamp: string; level: string; message: string }[] };
+  }>(`/v2/actor-runs/${runId}/logs${queryString}`);
   return res.data;
 }
 
@@ -223,20 +237,25 @@ export async function getRunInput(runId: string): Promise<unknown> {
     // Get run info to find the default KV store
     const run = await getRun(runId);
     if (!run.defaultKeyValueStoreId) return null;
-    
+
     // Fetch INPUT record from the KV store
-    const res = await fetchApi<unknown>(`/v2/key-value-stores/${run.defaultKeyValueStoreId}/records/INPUT`);
+    const res = await fetchApi<unknown>(
+      `/v2/key-value-stores/${run.defaultKeyValueStoreId}/records/INPUT`
+    );
     return res;
   } catch {
     return null;
   }
 }
 
-export async function getRunDatasetItems(runId: string, options?: { offset?: number; limit?: number }): Promise<unknown[]> {
+export async function getRunDatasetItems(
+  runId: string,
+  options?: { offset?: number; limit?: number }
+): Promise<unknown[]> {
   const params = new URLSearchParams();
   if (options?.offset !== undefined) params.append('offset', String(options.offset));
   if (options?.limit !== undefined) params.append('limit', String(options.limit));
-  
+
   const queryString = params.toString() ? `?${params.toString()}` : '';
   try {
     const res = await fetchApi<unknown[]>(`/v2/actor-runs/${runId}/dataset/items${queryString}`);
@@ -258,11 +277,11 @@ export async function getDashboardStats(): Promise<{
       getActors().catch(() => []),
       getDatasets().catch(() => []),
     ]);
-    
-    const succeeded = runs.filter(r => r.status === 'SUCCEEDED').length;
-    const failed = runs.filter(r => r.status === 'FAILED').length;
+
+    const succeeded = runs.filter((r) => r.status === 'SUCCEEDED').length;
+    const failed = runs.filter((r) => r.status === 'FAILED').length;
     const successRate = succeeded + failed > 0 ? (succeeded / (succeeded + failed)) * 100 : 100;
-    
+
     return {
       totalRuns: runs.length,
       activeActors: actors.length,
