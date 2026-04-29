@@ -200,15 +200,16 @@ export async function getDataset(id: string): Promise<Dataset> {
 export async function getDatasetItems(
   id: string,
   options?: { offset?: number; limit?: number }
-): Promise<Record<string, unknown>[]> {
+): Promise<unknown[]> {
   const params = new URLSearchParams();
   if (options?.offset !== undefined) params.append('offset', String(options.offset));
   if (options?.limit !== undefined) params.append('limit', String(options.limit));
 
   const queryString = params.toString() ? `?${params.toString()}` : '';
-  // API returns array directly, not wrapped in { data: ... }.
-  // Items are Apify-style dataset rows — always JSON objects, not scalars.
-  const res = await fetchApi<Record<string, unknown>[]>(`/v2/datasets/${id}/items${queryString}`);
+  // API accepts arbitrary JSON (POST /v2/datasets/:id/items wraps non-arrays
+  // into a single-element list), so items can be objects, scalars, or arrays.
+  // Callers must narrow per their own rendering needs.
+  const res = await fetchApi<unknown[]>(`/v2/datasets/${id}/items${queryString}`);
   return res;
 }
 
