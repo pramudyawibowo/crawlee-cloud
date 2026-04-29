@@ -146,6 +146,9 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
       name?: string;
       title?: string;
       description?: string;
+      defaultRunOptions?: Record<string, unknown>;
+      maxRetries?: number;
+      retryDelaySecs?: number;
     };
   }>('/acts/:actorId', async (request, reply) => {
     const { actorId } = request.params;
@@ -166,6 +169,18 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
     if (updates.description !== undefined) {
       setClauses.push(`description = $${paramIndex++}`);
       values.push(updates.description);
+    }
+    if (updates.defaultRunOptions !== undefined) {
+      setClauses.push(`default_run_options = $${paramIndex++}`);
+      values.push(JSON.stringify(updates.defaultRunOptions));
+    }
+    if (updates.maxRetries !== undefined) {
+      setClauses.push(`max_retries = $${paramIndex++}`);
+      values.push(updates.maxRetries);
+    }
+    if (updates.retryDelaySecs !== undefined) {
+      setClauses.push(`retry_delay_secs = $${paramIndex++}`);
+      values.push(updates.retryDelaySecs);
     }
 
     values.push(actorId);
