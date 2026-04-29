@@ -67,24 +67,34 @@ export async function setupAdminUser(): Promise<void> {
 async function setupRunnerApiKey(adminUserId: string): Promise<void> {
   try {
     // Check if runner key already exists
-    const existing = await pool.query(
-      'SELECT id FROM api_keys WHERE name = $1 AND is_active = true',
+    const existing = await pool.query<{ id: string; user_id: string }>(
+      'SELECT id, user_id FROM api_keys WHERE name = $1 AND is_active = true',
       [RUNNER_API_KEY_NAME]
     );
 
     // Check if the raw key is still in Redis
     const existingKey = await redis.get(RUNNER_API_KEY_REDIS_KEY);
 
-    if (existing.rows.length > 0 && existingKey) {
+    // Reuse only when the key exists in BOTH stores AND is bound to the
+    // current admin. If the admin user changed since last setup, the key
+    // would still authenticate, but every storage route scopes by user_id —
+    // so actor runs would 404 on their own datasets/KV/queues.
+    const existingRow = existing.rows[0];
+    if (existingRow && existingKey && existingRow.user_id === adminUserId) {
       console.log('[Setup] Runner API key already exists');
       return;
     }
 
-    // Deactivate any old runner keys
+    // Deactivate any old runner keys (any user, including stale bindings)
     if (existing.rows.length > 0) {
       await pool.query('UPDATE api_keys SET is_active = false WHERE name = $1', [
         RUNNER_API_KEY_NAME,
       ]);
+      if (existingRow && existingRow.user_id !== adminUserId) {
+        console.log(
+          `[Setup] Runner API key was bound to stale user ${existingRow.user_id}, regenerating for admin ${adminUserId}`
+        );
+      }
     }
 
     // Generate new runner API key
