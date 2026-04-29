@@ -176,6 +176,31 @@ describe('Actor Routes', () => {
 
       expect(response.statusCode).toBe(200);
     });
+
+    it('should persist defaultRunOptions on update', async () => {
+      const dro = {
+        image: 'ghcr.io/example/repo/actor-foo:latest',
+        envVars: { BASE_URL: 'https://example.com' },
+      };
+      mockQuery.mockResolvedValueOnce({
+        rows: [createActorRow({ default_run_options: dro })],
+      });
+
+      const response = await app.inject({
+        method: 'PUT',
+        url: '/v2/acts/actor-1',
+        payload: { defaultRunOptions: dro },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const updateCall = mockQuery.mock.calls[0] as [string, unknown[]];
+      const sql = updateCall[0];
+      expect(sql).toMatch(/default_run_options = \$/);
+      const storedJson = updateCall[1].find(
+        (v) => typeof v === 'string' && v.includes('"image"')
+      ) as string;
+      expect(JSON.parse(storedJson)).toEqual(dro);
+    });
   });
 
   describe('DELETE /v2/acts/:actorId', () => {
