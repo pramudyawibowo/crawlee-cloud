@@ -131,7 +131,7 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
 
     if (!result.rows[0]) {
       reply.status(404);
-      return { error: { message: 'Actor not found' } };
+      return { error: { type: 'record-not-found', message: 'Actor not found' } };
     }
 
     return { data: formatActor(result.rows[0]) };
@@ -199,7 +199,7 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
 
     if (!result.rows[0]) {
       reply.status(404);
-      return { error: { message: 'Actor not found' } };
+      return { error: { type: 'record-not-found', message: 'Actor not found' } };
     }
 
     return { data: formatActor(result.rows[0]) };
@@ -216,7 +216,7 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
     );
     if (result.rowCount === 0) {
       reply.status(404);
-      return { error: { message: 'Actor not found' } };
+      return { error: { type: 'record-not-found', message: 'Actor not found' } };
     }
     reply.status(204);
   });
@@ -249,7 +249,7 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
 
     if (!actor.rows[0]) {
       reply.status(404);
-      return { error: { message: 'Actor not found' } };
+      return { error: { type: 'record-not-found', message: 'Actor not found' } };
     }
 
     // Create default storages for this run

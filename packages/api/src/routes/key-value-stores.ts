@@ -86,7 +86,7 @@ export const keyValueStoresRoutes: FastifyPluginAsync = async (fastify) => {
 
       if (!result.rows[0]) {
         reply.status(404);
-        return { error: { message: 'Key-value store not found' } };
+        return { error: { type: 'record-not-found', message: 'Key-value store not found' } };
       }
 
       await query('UPDATE key_value_stores SET accessed_at = NOW() WHERE id = $1', [
@@ -110,7 +110,7 @@ export const keyValueStoresRoutes: FastifyPluginAsync = async (fastify) => {
       );
       if (result.rowCount === 0) {
         reply.status(404);
-        return { error: { message: 'Key-value store not found' } };
+        return { error: { type: 'record-not-found', message: 'Key-value store not found' } };
       }
       reply.status(204);
     }
@@ -134,7 +134,7 @@ export const keyValueStoresRoutes: FastifyPluginAsync = async (fastify) => {
 
     if (!store.rows[0]) {
       reply.status(404);
-      return { error: { message: 'Key-value store not found' } };
+      return { error: { type: 'record-not-found', message: 'Key-value store not found' } };
     }
 
     const result = await listKVKeys(store.rows[0].id, { limit, exclusiveStartKey });
@@ -168,7 +168,7 @@ export const keyValueStoresRoutes: FastifyPluginAsync = async (fastify) => {
 
       if (!store.rows[0]) {
         reply.status(404);
-        return { error: { message: 'Key-value store not found' } };
+        return { error: { type: 'record-not-found', message: 'Key-value store not found' } };
       }
 
       const record = await getKVRecord(store.rows[0].id, key);
@@ -251,7 +251,7 @@ export const keyValueStoresRoutes: FastifyPluginAsync = async (fastify) => {
 
       if (!store.rows[0]) {
         reply.status(404);
-        return { error: { message: 'Key-value store not found' } };
+        return { error: { type: 'record-not-found', message: 'Key-value store not found' } };
       }
 
       await deleteKVRecord(store.rows[0].id, key);

@@ -50,7 +50,7 @@ export const schedulesRoutes: FastifyPluginAsync = async (fastify) => {
 
     if (!actor.rows[0]) {
       reply.status(404);
-      return { error: { message: 'Actor not found' } };
+      return { error: { type: 'record-not-found', message: 'Actor not found' } };
     }
 
     const actorId = (actor.rows[0] as { id: string }).id;
@@ -113,7 +113,7 @@ export const schedulesRoutes: FastifyPluginAsync = async (fastify) => {
 
       if (!result.rows[0]) {
         reply.status(404);
-        return { error: { message: 'Schedule not found' } };
+        return { error: { type: 'record-not-found', message: 'Schedule not found' } };
       }
 
       return { data: formatSchedule(result.rows[0]) };
@@ -146,7 +146,7 @@ export const schedulesRoutes: FastifyPluginAsync = async (fastify) => {
 
       if (!actor.rows[0]) {
         reply.status(404);
-        return { error: { message: 'Actor not found' } };
+        return { error: { type: 'record-not-found', message: 'Actor not found' } };
       }
 
       updates.actorId = (actor.rows[0] as { id: string }).id;
@@ -194,7 +194,7 @@ export const schedulesRoutes: FastifyPluginAsync = async (fastify) => {
 
     if (!result.rows[0]) {
       reply.status(404);
-      return { error: { message: 'Schedule not found' } };
+      return { error: { type: 'record-not-found', message: 'Schedule not found' } };
     }
 
     await reloadSchedule(request.params.scheduleId);
@@ -216,7 +216,7 @@ export const schedulesRoutes: FastifyPluginAsync = async (fastify) => {
 
       if (result.rowCount === 0) {
         reply.status(404);
-        return { error: { message: 'Schedule not found' } };
+        return { error: { type: 'record-not-found', message: 'Schedule not found' } };
       }
 
       unregisterSchedule(request.params.scheduleId);

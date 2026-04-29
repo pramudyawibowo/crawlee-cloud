@@ -89,7 +89,7 @@ export const datasetsRoutes: FastifyPluginAsync = async (fastify) => {
 
     if (!result.rows[0]) {
       reply.status(404);
-      return { error: { message: 'Dataset not found' } };
+      return { error: { type: 'record-not-found', message: 'Dataset not found' } };
     }
 
     // Update accessed_at
@@ -112,7 +112,7 @@ export const datasetsRoutes: FastifyPluginAsync = async (fastify) => {
       );
       if (result.rowCount === 0) {
         reply.status(404);
-        return { error: { message: 'Dataset not found' } };
+        return { error: { type: 'record-not-found', message: 'Dataset not found' } };
       }
       reply.status(204);
     }
@@ -137,7 +137,7 @@ export const datasetsRoutes: FastifyPluginAsync = async (fastify) => {
 
     if (!dataset.rows[0]) {
       reply.status(404);
-      return { error: { message: 'Dataset not found' } };
+      return { error: { type: 'record-not-found', message: 'Dataset not found' } };
     }
 
     // Get items from S3
