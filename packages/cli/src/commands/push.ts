@@ -187,19 +187,39 @@ export const pushCommand = new Command('push')
       //   actor.json `environmentVariables`
       //     < --env-file (CI-friendly: gitignored .env-style file)
       //       < --env KEY=VALUE flag (per-run override)
-      // Empty values are dropped so a CI step that didn't provide a secret
-      // doesn't accidentally clear a value declared in actor.json.
+      // Empties are dropped from each *override* layer before merging — an
+      // empty override means "don't override," so an unset CI secret can't
+      // clobber a non-empty actor.json default. (Whatever ships in
+      // actor.json is the author's intent, so we don't strip it.)
       const fromActorJson = actorJson.environmentVariables ?? {};
       const fromFile = options.envFile ? await loadEnvFile(options.envFile as string) : {};
       const fromFlag = (options.env as Record<string, string>) ?? {};
-      const mergedEnvVars = dropEmpty({ ...fromActorJson, ...fromFile, ...fromFlag });
+      const mergedEnvVars = {
+        ...fromActorJson,
+        ...dropEmpty(fromFile),
+        ...dropEmpty(fromFlag),
+      };
+
+      // Resolve the image reference runners will pull. Mirrors the build/push
+      // branches above so the stored value matches whatever was actually pushed:
+      //   --ghcr:                       ghcr.io/<repo>/actor-<name>:<tag>
+      //   config.registryUrl + local:   <registryUrl>/actor-<name>:<tag>
+      //   local only / remote:          imageName (local Docker daemon convention)
+      // Without this, ghcr / registryUrl deploys would store the local
+      // `crawlee-cloud/actor-...` tag and runners would fail to pull it.
+      const runtimeImage =
+        buildMode === 'ghcr'
+          ? `ghcr.io/${(options.ghcr as string).toLowerCase()}/actor-${actorName}:${options.tag as string}`
+          : config.registryUrl && buildMode === 'local'
+            ? `${config.registryUrl}/actor-${actorName}:${options.tag as string}`
+            : imageName;
 
       const actorPayload = {
         name: actorName,
         title: actorJson.title,
         description: actorJson.description,
         defaultRunOptions: {
-          image: imageName,
+          image: runtimeImage,
           envVars: Object.keys(mergedEnvVars).length > 0 ? mergedEnvVars : undefined,
         },
       };
