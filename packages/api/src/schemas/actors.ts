@@ -16,6 +16,14 @@ export const CreateActorSchema = z.object({
       build: z.string().optional(),
       timeoutSecs: z.number().int().positive().optional(),
       memoryMbytes: z.number().int().positive().optional(),
+      // Full image reference written by `crc push` (e.g.
+      // `ghcr.io/org/repo/actor-foo:latest`). When set, the runner uses
+      // this exact value and skips registry-based path construction.
+      image: z.string().min(1).optional(),
+      // Per-actor env vars merged into every run's container environment.
+      // Lower precedence than runtime `-e` overrides (which live in Redis
+      // per-run); runtime overrides win on key conflict.
+      envVars: z.record(z.string()).optional(),
     })
     .optional(),
   maxRetries: z.number().int().min(0).max(10).optional(),

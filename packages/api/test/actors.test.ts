@@ -108,6 +108,32 @@ describe('Actor Routes', () => {
 
       expect(response.statusCode).toBe(200);
     });
+
+    it('should accept image and envVars in defaultRunOptions', async () => {
+      const defaultRunOptions = {
+        image: 'ghcr.io/example/repo/actor-foo:latest',
+        envVars: { BASE_URL: 'https://example.com', API_KEY: 'secret' },
+        timeoutSecs: 600,
+      };
+      const stored = createActorRow({
+        default_run_options: defaultRunOptions,
+      });
+      mockQuery.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [stored] });
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v2/acts',
+        payload: { name: 'foo', defaultRunOptions },
+      });
+
+      expect(response.statusCode).toBe(201);
+      const insertCall = mockQuery.mock.calls[1] as [string, unknown[]];
+      const storedJson = insertCall[1][5] as string;
+      const parsed = JSON.parse(storedJson) as typeof defaultRunOptions;
+      expect(parsed.image).toBe(defaultRunOptions.image);
+      expect(parsed.envVars).toEqual(defaultRunOptions.envVars);
+      expect(parsed.timeoutSecs).toBe(600);
+    });
   });
 
   describe('GET /v2/acts/:actorId', () => {

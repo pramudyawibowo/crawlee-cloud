@@ -61,6 +61,16 @@ export const pushCommand = new Command('push')
   .option('--ghcr <repo>', 'Push to GitHub Container Registry (e.g. org/repo)')
   .option('--ghcr-user <user>', 'GHCR username (default: github)')
   .option('--ghcr-token <token>', 'GHCR token (or set GHCR_TOKEN env var)')
+  .option(
+    '-e, --env <KEY=VALUE>',
+    'Set actor default env var (repeatable). Empty values are dropped.',
+    collectEnv,
+    {} as Record<string, string>
+  )
+  .option(
+    '--env-file <path>',
+    'Load actor default env vars from a file (KEY=VALUE per line, # comments allowed)'
+  )
   .action(async (options) => {
     console.log(chalk.bold('\n📤 Pushing Actor to Crawlee Cloud\n'));
 
@@ -173,13 +183,44 @@ export const pushCommand = new Command('push')
         if (existing) existingId = existing.id;
       }
 
+      // Resolve actor default env vars. Precedence (later wins):
+      //   actor.json `environmentVariables`
+      //     < --env-file (CI-friendly: gitignored .env-style file)
+      //       < --env KEY=VALUE flag (per-run override)
+      // Empties are dropped from each *override* layer before merging — an
+      // empty override means "don't override," so an unset CI secret can't
+      // clobber a non-empty actor.json default. (Whatever ships in
+      // actor.json is the author's intent, so we don't strip it.)
+      const fromActorJson = actorJson.environmentVariables ?? {};
+      const fromFile = options.envFile ? await loadEnvFile(options.envFile as string) : {};
+      const fromFlag = (options.env as Record<string, string>) ?? {};
+      const mergedEnvVars = {
+        ...fromActorJson,
+        ...dropEmpty(fromFile),
+        ...dropEmpty(fromFlag),
+      };
+
+      // Resolve the image reference runners will pull. Mirrors the build/push
+      // branches above so the stored value matches whatever was actually pushed:
+      //   --ghcr:                       ghcr.io/<repo>/actor-<name>:<tag>
+      //   config.registryUrl + local:   <registryUrl>/actor-<name>:<tag>
+      //   local only / remote:          imageName (local Docker daemon convention)
+      // Without this, ghcr / registryUrl deploys would store the local
+      // `crawlee-cloud/actor-...` tag and runners would fail to pull it.
+      const runtimeImage =
+        buildMode === 'ghcr'
+          ? `ghcr.io/${(options.ghcr as string).toLowerCase()}/actor-${actorName}:${options.tag as string}`
+          : config.registryUrl && buildMode === 'local'
+            ? `${config.registryUrl}/actor-${actorName}:${options.tag as string}`
+            : imageName;
+
       const actorPayload = {
         name: actorName,
         title: actorJson.title,
         description: actorJson.description,
         defaultRunOptions: {
-          image: imageName,
-          envVars: actorJson.environmentVariables,
+          image: runtimeImage,
+          envVars: Object.keys(mergedEnvVars).length > 0 ? mergedEnvVars : undefined,
         },
       };
 
@@ -347,6 +388,55 @@ async function buildAndPushGhcr(
 }
 
 // ---- Helpers ----
+
+/**
+ * commander value-collector for repeatable `-e KEY=VALUE` flags.
+ * Throws on malformed input rather than silently dropping it — bad args
+ * during CI deploys would otherwise look like "no env vars set" later.
+ */
+function collectEnv(arg: string, prev: Record<string, string>): Record<string, string> {
+  const eq = arg.indexOf('=');
+  if (eq <= 0) {
+    throw new Error(`Invalid --env value "${arg}". Expected KEY=VALUE.`);
+  }
+  const key = arg.slice(0, eq);
+  const value = arg.slice(eq + 1);
+  return { ...prev, [key]: value };
+}
+
+/**
+ * Parse a .env-style file into a flat map. Supports `# comments`, blank
+ * lines, and quoted values. Does NOT do shell interpolation (no `$VAR`
+ * expansion) — that's the caller's job if they want it.
+ */
+async function loadEnvFile(filePath: string): Promise<Record<string, string>> {
+  const content = await fs.readFile(filePath, 'utf8');
+  const out: Record<string, string> = {};
+  for (const rawLine of content.split('\n')) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const eq = line.indexOf('=');
+    if (eq <= 0) continue;
+    const key = line.slice(0, eq).trim();
+    let value = line.slice(eq + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+function dropEmpty(map: Record<string, string | undefined>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(map)) {
+    if (v !== undefined && v !== '') out[k] = v;
+  }
+  return out;
+}
 
 function runCommand(cmd: string, args: string[], cwd: string): Promise<void> {
   return new Promise((resolve, reject) => {
