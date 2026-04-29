@@ -111,7 +111,7 @@ export const webhooksRoutes: FastifyPluginAsync = async (fastify) => {
 
     if (!result.rows[0]) {
       reply.status(404);
-      return { error: { message: 'Webhook not found' } };
+      return { error: { type: 'record-not-found', message: 'Webhook not found' } };
     }
 
     return { data: formatWebhook(result.rows[0]) };
@@ -181,7 +181,7 @@ export const webhooksRoutes: FastifyPluginAsync = async (fastify) => {
 
     if (!result.rows[0]) {
       reply.status(404);
-      return { error: { message: 'Webhook not found' } };
+      return { error: { type: 'record-not-found', message: 'Webhook not found' } };
     }
 
     return { data: formatWebhook(result.rows[0]) };
@@ -201,7 +201,7 @@ export const webhooksRoutes: FastifyPluginAsync = async (fastify) => {
 
       if (result.rowCount === 0) {
         reply.status(404);
-        return { error: { message: 'Webhook not found' } };
+        return { error: { type: 'record-not-found', message: 'Webhook not found' } };
       }
 
       reply.status(204);
@@ -227,7 +227,7 @@ export const webhooksRoutes: FastifyPluginAsync = async (fastify) => {
 
     if (!webhook.rows[0]) {
       reply.status(404);
-      return { error: { message: 'Webhook not found' } };
+      return { error: { type: 'record-not-found', message: 'Webhook not found' } };
     }
 
     const result = await query<DeliveryRow>(

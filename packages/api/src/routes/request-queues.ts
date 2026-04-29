@@ -132,7 +132,7 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
 
       if (!result.rows[0]) {
         reply.status(404);
-        return { error: { message: 'Request queue not found' } };
+        return { error: { type: 'record-not-found', message: 'Request queue not found' } };
       }
 
       await query('UPDATE request_queues SET accessed_at = NOW() WHERE id = $1', [
@@ -156,7 +156,7 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
       );
       if (result.rowCount === 0) {
         reply.status(404);
-        return { error: { message: 'Request queue not found' } };
+        return { error: { type: 'record-not-found', message: 'Request queue not found' } };
       }
       reply.status(204);
     }
@@ -179,7 +179,7 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
 
     if (!queue.rows[0]) {
       reply.status(404);
-      return { error: { message: 'Request queue not found' } };
+      return { error: { type: 'record-not-found', message: 'Request queue not found' } };
     }
 
     // Get pending requests, ordered by order_no
@@ -226,7 +226,7 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
 
     if (!queue.rows[0]) {
       reply.status(404);
-      return { error: { message: 'Request queue not found' } };
+      return { error: { type: 'record-not-found', message: 'Request queue not found' } };
     }
 
     const qId = queue.rows[0].id;
@@ -585,7 +585,7 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
 
       if (!result.rows[0]) {
         reply.status(404);
-        return { error: { message: 'Request not found' } };
+        return { error: { type: 'record-not-found', message: 'Request not found' } };
       }
 
       return { data: formatRequest(result.rows[0]) };
@@ -623,7 +623,7 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
 
     if (!existingResult.rows[0]) {
       reply.status(404);
-      return { error: { message: 'Request not found' } };
+      return { error: { type: 'record-not-found', message: 'Request not found' } };
     }
 
     const existing = existingResult.rows[0];
@@ -718,7 +718,7 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
 
     if (!queue.rows[0]) {
       reply.status(404);
-      return { error: { message: 'Request queue not found' } };
+      return { error: { type: 'record-not-found', message: 'Request queue not found' } };
     }
 
     // Check request exists
@@ -729,7 +729,7 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
 
     if (!req.rows[0]) {
       reply.status(404);
-      return { error: { message: 'Request not found' } };
+      return { error: { type: 'record-not-found', message: 'Request not found' } };
     }
 
     // Prolong in Redis
@@ -764,7 +764,7 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
 
     if (!queue.rows[0]) {
       reply.status(404);
-      return { error: { message: 'Request queue not found' } };
+      return { error: { type: 'record-not-found', message: 'Request queue not found' } };
     }
 
     // Release in Redis

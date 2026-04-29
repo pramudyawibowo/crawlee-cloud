@@ -68,7 +68,7 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
 
     if (!result.rows[0]) {
       reply.status(404);
-      return { error: { message: 'Run not found' } };
+      return { error: { type: 'record-not-found', message: 'Run not found' } };
     }
 
     return { data: formatRun(result.rows[0]) };
@@ -120,7 +120,7 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
 
     if (!result.rows[0]) {
       reply.status(404);
-      return { error: { message: 'Run not found' } };
+      return { error: { type: 'record-not-found', message: 'Run not found' } };
     }
 
     return { data: formatRun(result.rows[0]) };
@@ -146,7 +146,9 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
 
       if (!result.rows[0]) {
         reply.status(404);
-        return { error: { message: 'Run not found or already finished' } };
+        return {
+          error: { type: 'record-not-found', message: 'Run not found or already finished' },
+        };
       }
 
       return { data: formatRun(result.rows[0]) };
@@ -173,7 +175,9 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
 
       if (!result.rows[0]) {
         reply.status(404);
-        return { error: { message: 'Run not found or not in terminal state' } };
+        return {
+          error: { type: 'record-not-found', message: 'Run not found or not in terminal state' },
+        };
       }
 
       return { data: formatRun(result.rows[0]) };
@@ -199,7 +203,7 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
 
     if (!run.rows[0] || !run.rows[0].default_dataset_id) {
       reply.status(404);
-      return { error: { message: 'Run or dataset not found' } };
+      return { error: { type: 'record-not-found', message: 'Run or dataset not found' } };
     }
 
     // Redirect to dataset items endpoint
@@ -232,7 +236,7 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
 
       if (!run.rows[0] || !run.rows[0].default_key_value_store_id) {
         reply.status(404);
-        return { error: { message: 'Run or KV store not found' } };
+        return { error: { type: 'record-not-found', message: 'Run or KV store not found' } };
       }
 
       const { getKVRecord } = await import('../storage/s3.js');
@@ -240,7 +244,7 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
 
       if (!record) {
         reply.status(404);
-        return { error: { message: 'Record not found' } };
+        return { error: { type: 'record-not-found', message: 'Record not found' } };
       }
 
       reply.header('content-type', record.contentType);

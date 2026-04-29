@@ -36,7 +36,7 @@ export const logsRoutes: FastifyPluginAsync = async (fastify) => {
     // Verify run ownership
     if (!(await verifyRunOwnership(runId, request.user!.id))) {
       reply.status(404);
-      return { error: { message: 'Run not found' } };
+      return { error: { type: 'record-not-found', message: 'Run not found' } };
     }
 
     const { message, level = 'INFO', timestamp = new Date().toISOString() } = request.body;
@@ -66,7 +66,7 @@ export const logsRoutes: FastifyPluginAsync = async (fastify) => {
     // Verify run ownership
     if (!(await verifyRunOwnership(runId, request.user!.id))) {
       reply.status(404);
-      return { error: { message: 'Run not found' } };
+      return { error: { type: 'record-not-found', message: 'Run not found' } };
     }
 
     const offset = Math.max(0, parseInt(request.query.offset || '0', 10) || 0);
