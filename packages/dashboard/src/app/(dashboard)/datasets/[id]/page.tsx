@@ -76,7 +76,13 @@ function DatasetDetailContent() {
       try {
         const offset = (page - 1) * limit;
         const data = await getDatasetItems(id, { offset, limit });
-        setItems(data);
+        // The API may return scalars or arrays; the table view assumes
+        // object rows (renders by Object.keys), so drop anything else.
+        const objectRows = data.filter(
+          (item): item is Record<string, unknown> =>
+            typeof item === 'object' && item !== null && !Array.isArray(item)
+        );
+        setItems(objectRows);
       } catch (err) {
         console.error('Failed to load items:', err);
       } finally {

@@ -86,7 +86,10 @@ jobs:
       - run: npm run build
       - name: Create MinIO bucket
         run: |
-          curl -s https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
+          # -fL: fail loudly on HTTP errors and follow redirects. The
+          # dl.min.io URL now 302s to GitHub releases, so without -L
+          # curl was silently writing the redirect HTML to mc.
+          curl -fL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
           chmod +x /usr/local/bin/mc
           mc alias set ci http://localhost:9000 minioadmin minioadmin
           mc mb ci/crawlee-test --ignore-existing
