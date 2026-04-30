@@ -18,7 +18,12 @@ export class DigitalOceanProvider implements RunnerProvider {
     }
   }
 
-  private async doRequest<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async doRequest<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    opts: { allowStatuses?: number[] } = {}
+  ): Promise<T> {
     const res = await fetch(`${DO_API}${path}`, {
       method,
       headers: {
@@ -29,6 +34,9 @@ export class DigitalOceanProvider implements RunnerProvider {
     });
 
     if (!res.ok) {
+      if (opts.allowStatuses?.includes(res.status)) {
+        return {} as T;
+      }
       const err = await res.text();
       throw new Error(`[Scaler/DO] ${method} ${path}: ${res.status} ${err}`);
     }
@@ -89,7 +97,11 @@ export class DigitalOceanProvider implements RunnerProvider {
 
   async destroyRunner(id: string): Promise<void> {
     console.log(`[Scaler/DO] Destroying Droplet ${id}`);
-    await this.doRequest('DELETE', `/droplets/${id}`);
+    // Tolerate 404 — the Droplet may have been deleted out-of-band (manual
+    // cleanup, account-level removal, or by a previous reap whose listing
+    // hadn't yet caught up). Without this, the reaper would log the same
+    // error every tick forever.
+    await this.doRequest('DELETE', `/droplets/${id}`, undefined, { allowStatuses: [404] });
   }
 
   async listRunners(): Promise<RunnerInfo[]> {

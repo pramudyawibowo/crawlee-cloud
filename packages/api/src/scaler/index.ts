@@ -12,6 +12,7 @@ import { redis } from '../storage/redis.js';
 import type { RunnerProvider, RunnerInfo, ScalerConfig } from './types.js';
 import { NoopProvider } from './providers/noop.js';
 import { DigitalOceanProvider } from './providers/digitalocean.js';
+import { LocalDockerProvider } from './providers/local-docker.js';
 
 let provider: RunnerProvider;
 let config: ScalerConfig;
@@ -24,7 +25,15 @@ const LAST_ACTIVITY_KEY = 'scaler:last-activity';
 
 // ---- Cloud-init template for new runners ----
 
-function getCloudInitScript(): string {
+/**
+ * Render the cloud-init script that bootstraps a freshly-created VM into
+ * a runner. Exported so it can be unit-tested in isolation — the script
+ * is shell that runs on a real Linux box, so any unescaped value or
+ * missing env var would only surface as a silent boot failure.
+ *
+ * Pure: only reads from `process.env` and the provided `runsPerRunner`.
+ */
+export function getCloudInitScript(runsPerRunner: number): string {
   const dbUrl = process.env.DATABASE_URL || '';
   const redisUrl = process.env.REDIS_URL || '';
   const apiBaseUrl = process.env.SCALER_API_BASE_URL || '';
@@ -50,7 +59,7 @@ DATABASE_URL=${dbUrl}
 REDIS_URL=${redisUrl}
 API_BASE_URL=${apiBaseUrl}
 DOCKER_NETWORK=bridge
-MAX_CONCURRENT_RUNS=${config.runsPerRunner}
+MAX_CONCURRENT_RUNS=${runsPerRunner}
 DEFAULT_MEMORY_MB=2048
 DEFAULT_TIMEOUT_SECS=3600
 LOG_LEVEL=info
@@ -91,7 +100,7 @@ curl -s -X POST "${apiBaseUrl}/v2/internal/runner-ready" -H "Content-Type: appli
 
 // ---- Scaling logic ----
 
-interface QueueStats {
+export interface QueueStats {
   ready: number;
   running: number;
   total: number;
@@ -114,24 +123,34 @@ async function getQueueStats(): Promise<QueueStats> {
   return stats;
 }
 
-function calculateDesiredRunners(stats: QueueStats, currentRunners: number): number {
+/**
+ * Pure function: given queue stats, current runner count, and scaler config,
+ * return how many runners we want.
+ *
+ * Exported so it can be unit-tested without standing up the full loop.
+ */
+export function calculateDesiredRunners(
+  stats: QueueStats,
+  currentRunners: number,
+  cfg: ScalerConfig
+): number {
   const { ready, running } = stats;
   const totalDemand = ready + running;
 
   if (totalDemand === 0) {
-    return config.minRunners;
+    return cfg.minRunners;
   }
 
   // Don't scale up until queue pressure exceeds threshold
-  if (ready <= config.scaleUpThreshold && currentRunners >= config.minRunners) {
+  if (ready <= cfg.scaleUpThreshold && currentRunners >= cfg.minRunners) {
     return currentRunners;
   }
 
   // Each runner handles N concurrent runs
-  const needed = Math.ceil(totalDemand / config.runsPerRunner);
+  const needed = Math.ceil(totalDemand / cfg.runsPerRunner);
 
   // Clamp to min/max
-  return Math.max(config.minRunners, Math.min(needed, config.maxRunners));
+  return Math.max(cfg.minRunners, Math.min(needed, cfg.maxRunners));
 }
 
 async function getActiveRunners(): Promise<RunnerInfo[]> {
@@ -178,8 +197,10 @@ async function getActiveRunners(): Promise<RunnerInfo[]> {
         // No heartbeat — runner may still be booting or is dead
         const ageMs = Date.now() - runner.createdAt.getTime();
         if (ageMs > 180_000) {
-          // Older than 3 minutes with no heartbeat — likely dead
-          runner.status = 'draining';
+          // Older than 3 minutes with no heartbeat — presume dead.
+          // Distinct from 'draining' (alive but stressed) so the reaper
+          // can destroy it without conflating with demand-based scale-down.
+          runner.status = 'dead';
         }
       }
     }
@@ -200,7 +221,7 @@ async function scaleUp(count: number): Promise<void> {
         region: config.runnerRegion,
         size: config.runnerSize,
         sshKeyId: config.sshKeyId,
-        userData: getCloudInitScript(),
+        userData: getCloudInitScript(config.runsPerRunner),
         tags: ['crawlee-runner', 'auto-scaled'],
       });
       console.log(`[Scaler] Created runner ${runner.id} at ${runner.ip}`);
@@ -235,15 +256,41 @@ async function scaleDown(runners: RunnerInfo[], count: number): Promise<void> {
   }
 }
 
+/**
+ * Destroy runners marked 'dead' (no heartbeat for >3min) and return the
+ * surviving list. This runs every tick, independent of demand — dead
+ * runners are garbage, not capacity, so they should be reaped regardless
+ * of whether the queue is full or empty.
+ */
+async function reapDeadRunners(runners: RunnerInfo[]): Promise<RunnerInfo[]> {
+  const dead = runners.filter((r) => r.status === 'dead');
+  if (dead.length === 0) return runners;
+
+  console.log(`[Scaler] Reaping ${dead.length} dead runner(s)`);
+  for (const runner of dead) {
+    try {
+      await provider.destroyRunner(runner.id);
+      console.log(`[Scaler] Reaped dead runner ${runner.id}`);
+    } catch (err) {
+      // Non-fatal: a missing runner just means it was already gone, and
+      // any other failure will be retried next tick (the runner remains
+      // in the provider's listRunners output until it's truly gone).
+      console.error(`[Scaler] Failed to reap ${runner.id}:`, (err as Error).message);
+    }
+  }
+  return runners.filter((r) => r.status !== 'dead');
+}
+
 async function scalingLoop(): Promise<void> {
   if (isScaling) return; // prevent overlapping checks
   isScaling = true;
 
   try {
     const stats = await getQueueStats();
-    const runners = await getActiveRunners();
+    let runners = await getActiveRunners();
+    runners = await reapDeadRunners(runners); // remove zombies before counting capacity
     const currentCount = runners.length;
-    const desired = calculateDesiredRunners(stats, currentCount);
+    const desired = calculateDesiredRunners(stats, currentCount, config);
 
     // Track activity for idle timeout
     if (stats.total > 0) {
@@ -319,6 +366,9 @@ export async function initScaler(): Promise<void> {
   switch (config.provider) {
     case 'digitalocean':
       provider = new DigitalOceanProvider(config.providerConfig);
+      break;
+    case 'local-docker':
+      provider = new LocalDockerProvider();
       break;
     case 'noop':
     default:
