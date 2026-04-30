@@ -27,12 +27,53 @@ export class LocalDockerProvider implements RunnerProvider {
     socketPath: process.env.DOCKER_SOCKET || '/var/run/docker.sock',
   });
 
+  /** Cache the resolved network so we only probe Docker once per process. */
+  private resolvedNetwork: string | null = null;
+
+  /**
+   * Pick the Docker network to attach runner containers to.
+   *
+   * Priority:
+   *   1. `DOCKER_NETWORK` env var (explicit override)
+   *   2. The single compose-managed network on the host (auto-detected via
+   *      `com.docker.compose.project` label)
+   *
+   * Throws a clear, actionable error otherwise — there is no safe default
+   * (Docker's `bridge` network can't resolve `postgres`/`redis` service
+   * names), and silently picking the wrong one gives an opaque
+   * "connection refused" several seconds later inside the runner.
+   */
+  private async resolveNetwork(): Promise<string> {
+    if (this.resolvedNetwork) return this.resolvedNetwork;
+
+    if (process.env.DOCKER_NETWORK) {
+      this.resolvedNetwork = process.env.DOCKER_NETWORK;
+      return this.resolvedNetwork;
+    }
+
+    type NetworkSummary = { Name: string; Labels?: Record<string, string> | null };
+    const networks = (await this.docker.listNetworks()) as NetworkSummary[];
+    const composeNets = networks.filter((n) => n.Labels?.['com.docker.compose.project']);
+
+    const [only] = composeNets;
+    if (composeNets.length === 1 && only) {
+      this.resolvedNetwork = only.Name;
+      console.log(`[Scaler/local-docker] Auto-detected network: ${this.resolvedNetwork}`);
+      return this.resolvedNetwork;
+    }
+
+    const available = composeNets.map((n) => n.Name).join(', ') || '(none found)';
+    throw new Error(
+      `[Scaler/local-docker] Cannot determine Docker network. ` +
+        `Set DOCKER_NETWORK explicitly to one of: ${available}. ` +
+        `(Run \`docker network ls\` and pick the one your postgres/redis services are attached to.)`
+    );
+  }
+
   async createRunner(_config: RunnerConfig): Promise<RunnerInfo> {
     const runnerId = `local-${nanoid(8)}`;
     const image = process.env.LOCAL_RUNNER_IMAGE || 'crawlee-cloud-runner:local';
-    // docker-compose.dev.yml has no `networks:` block, so compose creates
-    // `<project>_default`. The project basename here is `crawlee-platfrom`.
-    const network = process.env.DOCKER_NETWORK || 'crawlee-platfrom_default';
+    const network = await this.resolveNetwork();
 
     // Env vars the runner container needs to come up and heartbeat into Redis.
     // `RUNNER_ID` MUST equal `runnerId` below — that is what links the

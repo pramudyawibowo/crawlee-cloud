@@ -267,18 +267,21 @@ async function reapDeadRunners(runners: RunnerInfo[]): Promise<RunnerInfo[]> {
   if (dead.length === 0) return runners;
 
   console.log(`[Scaler] Reaping ${dead.length} dead runner(s)`);
+  const reaped = new Set<string>();
   for (const runner of dead) {
     try {
       await provider.destroyRunner(runner.id);
       console.log(`[Scaler] Reaped dead runner ${runner.id}`);
+      reaped.add(runner.id);
     } catch (err) {
-      // Non-fatal: a missing runner just means it was already gone, and
-      // any other failure will be retried next tick (the runner remains
-      // in the provider's listRunners output until it's truly gone).
+      // Failed destroys MUST stay in the runner list: if we removed them
+      // here, currentCount would understate real capacity and the scaler
+      // would over-provision on the next tick. The provider's listRunners
+      // will surface them again next time, where reap is retried.
       console.error(`[Scaler] Failed to reap ${runner.id}:`, (err as Error).message);
     }
   }
-  return runners.filter((r) => r.status !== 'dead');
+  return runners.filter((r) => !reaped.has(r.id));
 }
 
 async function scalingLoop(): Promise<void> {

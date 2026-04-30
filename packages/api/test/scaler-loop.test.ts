@@ -327,6 +327,32 @@ describe('scaler loop', () => {
       // Should not throw out of initScaler
       await expect(initScaler()).resolves.toBeUndefined();
     });
+
+    it('keeps a failed-to-reap runner in the count to avoid over-provisioning', async () => {
+      // Codex P1: if reaper drops a dead runner from the list before destroy
+      // has actually succeeded, currentCount understates real capacity and
+      // the scaler will spawn replacements on the next tick — exponentially
+      // over-provisioning under sustained transient destroy failures.
+      //
+      // We verify by setting up: 1 dead runner, destroy fails, queue has
+      // demand for 1 runner. If the dead runner were dropped, currentCount=0
+      // and the scaler would create a NEW one. With the fix, currentCount=1
+      // and no scale-up happens.
+      queryMock.mockResolvedValue(dbRows({ ready: 1 })); // ceil(1/2)=1 desired
+      noopList.mockResolvedValue([
+        makeRunner('failed-reap', { createdAt: new Date(Date.now() - 300_000) }),
+      ]);
+      redisKeys.mockResolvedValue([]); // no heartbeat → marked 'dead'
+      noopDestroy.mockRejectedValueOnce(new Error('transient API failure'));
+
+      await initScaler();
+
+      // Reap was attempted but failed; runner stays in the count.
+      expect(noopDestroy).toHaveBeenCalledWith('failed-reap');
+      // Critical: NO new runner spawned. The dead one is still counted as
+      // capacity until destroy actually succeeds on a future tick.
+      expect(noopCreate).not.toHaveBeenCalled();
+    });
   });
 
   describe('disabled scaler', () => {

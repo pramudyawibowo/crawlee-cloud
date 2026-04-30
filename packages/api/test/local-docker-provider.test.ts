@@ -32,6 +32,7 @@ const {
   removeContainer,
   listContainers,
   getContainer,
+  listNetworks,
 } = vi.hoisted(() => ({
   createContainer: vi.fn(),
   startContainer: vi.fn(),
@@ -39,6 +40,7 @@ const {
   removeContainer: vi.fn(),
   listContainers: vi.fn(),
   getContainer: vi.fn(),
+  listNetworks: vi.fn(),
 }));
 
 vi.mock('dockerode', () => {
@@ -47,6 +49,7 @@ vi.mock('dockerode', () => {
       createContainer = createContainer;
       listContainers = listContainers;
       getContainer = getContainer;
+      listNetworks = listNetworks;
     },
   };
 });
@@ -95,7 +98,9 @@ describe('LocalDockerProvider', () => {
     delete process.env.LOCAL_RUNNER_API_BASE_URL;
     delete process.env.LOCAL_RUNNER_DATABASE_URL;
     delete process.env.LOCAL_RUNNER_REDIS_URL;
-    delete process.env.DOCKER_NETWORK;
+    // Default network so most tests skip network detection.
+    process.env.DOCKER_NETWORK = 'test-network';
+    listNetworks.mockResolvedValue([]);
   });
 
   describe('createRunner', () => {
@@ -313,6 +318,82 @@ describe('LocalDockerProvider', () => {
       const runners = await provider.listRunners();
 
       expect(runners[0].id).toBe('docker-internal-id-3');
+    });
+  });
+
+  describe('network resolution', () => {
+    beforeEach(() => {
+      // These tests drive the auto-detection path, so the env-var
+      // override from the outer beforeEach must be cleared.
+      delete process.env.DOCKER_NETWORK;
+    });
+
+    it('honors DOCKER_NETWORK when set, no detection needed', async () => {
+      process.env.DOCKER_NETWORK = 'explicit-net';
+
+      const provider = new LocalDockerProvider();
+      await provider.createRunner(makeRunnerConfig());
+
+      expect(listNetworks).not.toHaveBeenCalled();
+      const opts = createContainer.mock.calls[0][0] as Docker.ContainerCreateOptions;
+      expect(opts.HostConfig?.NetworkMode).toBe('explicit-net');
+    });
+
+    it('auto-detects when exactly one compose-managed network exists', async () => {
+      listNetworks.mockResolvedValue([
+        { Name: 'bridge', Labels: null },
+        { Name: 'host', Labels: null },
+        {
+          Name: 'crawlee-platfrom_default',
+          Labels: { 'com.docker.compose.project': 'crawlee-platfrom' },
+        },
+      ]);
+
+      const provider = new LocalDockerProvider();
+      await provider.createRunner(makeRunnerConfig());
+
+      const opts = createContainer.mock.calls[0][0] as Docker.ContainerCreateOptions;
+      expect(opts.HostConfig?.NetworkMode).toBe('crawlee-platfrom_default');
+    });
+
+    it('throws a helpful error when no compose network is found', async () => {
+      listNetworks.mockResolvedValue([
+        { Name: 'bridge', Labels: null },
+        { Name: 'host', Labels: null },
+      ]);
+
+      const provider = new LocalDockerProvider();
+      await expect(provider.createRunner(makeRunnerConfig())).rejects.toThrow(
+        /Cannot determine Docker network.*\(none found\)/s
+      );
+    });
+
+    it('throws and lists candidates when multiple compose networks exist (ambiguous)', async () => {
+      listNetworks.mockResolvedValue([
+        { Name: 'projA_default', Labels: { 'com.docker.compose.project': 'projA' } },
+        { Name: 'projB_default', Labels: { 'com.docker.compose.project': 'projB' } },
+      ]);
+
+      const provider = new LocalDockerProvider();
+      await expect(provider.createRunner(makeRunnerConfig())).rejects.toThrow(
+        /projA_default.*projB_default/s
+      );
+    });
+
+    it('caches the resolved network across calls (does not re-list every createRunner)', async () => {
+      listNetworks.mockResolvedValue([
+        {
+          Name: 'crawlee-platfrom_default',
+          Labels: { 'com.docker.compose.project': 'crawlee-platfrom' },
+        },
+      ]);
+
+      const provider = new LocalDockerProvider();
+      await provider.createRunner(makeRunnerConfig());
+      await provider.createRunner(makeRunnerConfig());
+      await provider.createRunner(makeRunnerConfig());
+
+      expect(listNetworks).toHaveBeenCalledTimes(1);
     });
   });
 });
