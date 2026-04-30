@@ -9,8 +9,19 @@ export interface RunnerInfo {
   id: string;
   /** IP address for SSH access */
   ip: string;
-  /** Current state */
-  status: 'creating' | 'ready' | 'busy' | 'draining' | 'destroying';
+  /**
+   * Current state:
+   *   - creating:   provider returned, runner is booting / starting up
+   *   - ready:      heartbeat present, no active runs
+   *   - busy:       heartbeat present, has active runs
+   *   - draining:   heartbeat present but resource-pressured (high CPU/mem)
+   *                 — alive, may recover, NOT eligible for reaping
+   *   - dead:       no heartbeat for >3 minutes — presumed gone, eligible
+   *                 for reaping every tick (independent of demand-based
+   *                 scale-down)
+   *   - destroying: scaler has issued destroyRunner; provider is tearing it down
+   */
+  status: 'creating' | 'ready' | 'busy' | 'draining' | 'dead' | 'destroying';
   /** When this runner was created */
   createdAt: Date;
   /** Number of runs currently executing */
@@ -34,7 +45,7 @@ export interface ScalerConfig {
   /** Enable/disable the auto-scaler */
   enabled: boolean;
   /** Provider name */
-  provider: 'digitalocean' | 'noop';
+  provider: 'digitalocean' | 'noop' | 'local-docker';
   /** Min runners to keep alive (0 = scale to zero) */
   minRunners: number;
   /** Max runners to create */
