@@ -137,4 +137,28 @@ describe('getCloudInitScript', () => {
     expect(script).toContain('curl -s -X POST "https://api.example.com/v2/internal/runner-ready"');
     expect(script).toContain('|| true');
   });
+
+  describe('SCALER_INSECURE_TLS gate', () => {
+    // The previous behavior — unconditionally setting NODE_TLS_REJECT_UNAUTHORIZED=0
+    // on every runner — disabled cert verification on every outbound HTTPS call
+    // (API, S3, registries, actor scraping). v0.8.1 made it opt-in. These tests
+    // lock the new contract so the bypass cannot accidentally come back.
+    it('does NOT set NODE_TLS_REJECT_UNAUTHORIZED when SCALER_INSECURE_TLS is unset', () => {
+      const script = getCloudInitScript(2);
+      expect(script).not.toContain('NODE_TLS_REJECT_UNAUTHORIZED');
+    });
+
+    it('does NOT set NODE_TLS_REJECT_UNAUTHORIZED when SCALER_INSECURE_TLS is "false"', () => {
+      process.env.SCALER_INSECURE_TLS = 'false';
+      const script = getCloudInitScript(2);
+      expect(script).not.toContain('NODE_TLS_REJECT_UNAUTHORIZED');
+    });
+
+    it('emits NODE_TLS_REJECT_UNAUTHORIZED=0 in env file and systemd unit when SCALER_INSECURE_TLS=true', () => {
+      process.env.SCALER_INSECURE_TLS = 'true';
+      const script = getCloudInitScript(2);
+      expect(script).toContain('NODE_TLS_REJECT_UNAUTHORIZED=0');
+      expect(script).toContain('Environment=NODE_TLS_REJECT_UNAUTHORIZED=0');
+    });
+  });
 });

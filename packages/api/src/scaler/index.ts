@@ -23,6 +23,30 @@ let isScaling = false;
 const RUNNERS_KEY = 'scaler:runners';
 const LAST_ACTIVITY_KEY = 'scaler:last-activity';
 
+/** Parse a positive integer env var, falling back on missing/NaN/non-finite values. */
+function intEnv(name: string, defaultVal: number): number {
+  const raw = process.env[name];
+  if (!raw) return defaultVal;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) ? n : defaultVal;
+}
+
+/**
+ * Cursor-based SCAN replacement for `redis.keys(pattern)`. KEYS is O(N) over
+ * the entire keyspace and blocks the Redis event loop — fine in tests, lethal
+ * on a shared Redis at scale. SCAN walks in batches without blocking.
+ */
+async function scanKeys(pattern: string): Promise<string[]> {
+  const keys: string[] = [];
+  let cursor = '0';
+  do {
+    const [next, found] = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+    keys.push(...found);
+    cursor = next;
+  } while (cursor !== '0');
+  return keys;
+}
+
 // ---- Cloud-init template for new runners ----
 
 /**
@@ -38,6 +62,12 @@ export function getCloudInitScript(runsPerRunner: number): string {
   const redisUrl = process.env.REDIS_URL || '';
   const apiBaseUrl = process.env.SCALER_API_BASE_URL || '';
   const ghcrToken = process.env.GHCR_TOKEN || '';
+  // Off by default: when true, runners disable TLS cert verification globally.
+  // Only valid escape hatch is internal CAs / self-signed certs the runner
+  // can't otherwise trust. MITM-vulnerable when set.
+  const insecureTls = process.env.SCALER_INSECURE_TLS === 'true';
+  const tlsEnvFileLine = insecureTls ? 'NODE_TLS_REJECT_UNAUTHORIZED=0' : '';
+  const tlsSystemdLine = insecureTls ? 'Environment=NODE_TLS_REJECT_UNAUTHORIZED=0' : '';
 
   return `#!/bin/bash
 set -e
@@ -66,7 +96,7 @@ LOG_LEVEL=info
 IMAGE_REGISTRY=${process.env.IMAGE_REGISTRY || ''}
 IMAGE_REGISTRY_USER=${process.env.IMAGE_REGISTRY_USER || ''}
 IMAGE_REGISTRY_TOKEN=${process.env.IMAGE_REGISTRY_TOKEN || ''}
-NODE_TLS_REJECT_UNAUTHORIZED=0
+${tlsEnvFileLine}
 ENVEOF
 chmod 600 /etc/crawlee-runner.env
 
@@ -83,7 +113,7 @@ ExecStart=/usr/bin/node packages/runner/dist/index.js
 Restart=always
 RestartSec=5
 Environment=NODE_ENV=production
-Environment=NODE_TLS_REJECT_UNAUTHORIZED=0
+${tlsSystemdLine}
 EnvironmentFile=/etc/crawlee-runner.env
 [Install]
 WantedBy=multi-user.target
@@ -154,62 +184,65 @@ export function calculateDesiredRunners(
 }
 
 async function getActiveRunners(): Promise<RunnerInfo[]> {
-  try {
-    const runners = await provider.listRunners();
+  // Don't swallow listRunners errors here — a transient API failure that
+  // returns [] would let calculateDesiredRunners think we have zero capacity
+  // and over-provision on the next tick. Let the caller (scalingLoop) abort
+  // the tick instead so we act on real data only.
+  const runners = await provider.listRunners();
 
-    // Enrich runners with real metrics from heartbeats
-    const heartbeatKeys = await redis.keys('runner:heartbeat:*');
-    const heartbeats = new Map<
-      string,
-      { activeRuns: number; healthy: boolean; cpuUsage: number; memoryUsageRatio: number }
-    >();
+  // Enrich runners with real metrics from heartbeats
+  const heartbeatKeys = await scanKeys('runner:heartbeat:*');
+  const heartbeats = new Map<
+    string,
+    { activeRuns: number; healthy: boolean; cpuUsage: number; memoryUsageRatio: number }
+  >();
 
-    if (heartbeatKeys.length > 0) {
-      const values = await redis.mget(...heartbeatKeys);
-      for (const val of values) {
-        if (!val) continue;
-        try {
-          const hb = JSON.parse(val) as {
-            runnerId: string;
-            activeRuns: number;
-            healthy: boolean;
-            cpuUsage: number;
-            memoryUsageRatio: number;
-          };
-          heartbeats.set(hb.runnerId, hb);
-        } catch {
-          // skip malformed
-        }
+  if (heartbeatKeys.length > 0) {
+    const values = await redis.mget(...heartbeatKeys);
+    for (const val of values) {
+      if (!val) continue;
+      try {
+        const hb = JSON.parse(val) as {
+          runnerId: string;
+          activeRuns: number;
+          healthy: boolean;
+          cpuUsage: number;
+          memoryUsageRatio: number;
+        };
+        heartbeats.set(hb.runnerId, hb);
+      } catch {
+        // skip malformed
       }
     }
-
-    // Match heartbeats to runners by ID or hostname
-    for (const runner of runners) {
-      const hb = heartbeats.get(runner.id) || heartbeats.get(runner.ip);
-      if (hb) {
-        runner.activeRuns = hb.activeRuns;
-        runner.status = hb.activeRuns > 0 ? 'busy' : 'ready';
-        // Mark unhealthy runners
-        if (!hb.healthy || hb.memoryUsageRatio > 0.95 || hb.cpuUsage > 0.95) {
-          runner.status = 'draining';
-        }
-      } else {
-        // No heartbeat — runner may still be booting or is dead
-        const ageMs = Date.now() - runner.createdAt.getTime();
-        if (ageMs > 180_000) {
-          // Older than 3 minutes with no heartbeat — presume dead.
-          // Distinct from 'draining' (alive but stressed) so the reaper
-          // can destroy it without conflating with demand-based scale-down.
-          runner.status = 'dead';
-        }
-      }
-    }
-
-    return runners;
-  } catch (err) {
-    console.error('[Scaler] Failed to list runners:', (err as Error).message);
-    return [];
   }
+
+  // Match heartbeats to runners by ID or hostname
+  for (const runner of runners) {
+    const hb = heartbeats.get(runner.id) || heartbeats.get(runner.ip);
+    if (hb) {
+      runner.activeRuns = hb.activeRuns;
+      runner.status = hb.activeRuns > 0 ? 'busy' : 'ready';
+      // Mark unhealthy runners
+      if (!hb.healthy || hb.memoryUsageRatio > 0.95 || hb.cpuUsage > 0.95) {
+        runner.status = 'draining';
+      }
+    } else {
+      // No heartbeat — runner may still be booting or is dead.
+      // Threshold is env-configurable because cold-cloud-init paths
+      // (apt install nodejs + git clone + npm install + build) can
+      // exceed the default on slow apt mirrors or cold image caches,
+      // causing healthy-but-still-booting droplets to be reaped.
+      const ageMs = Date.now() - runner.createdAt.getTime();
+      const deadAfterMs = intEnv('SCALER_REAPER_DEAD_AFTER_SECS', 180) * 1000;
+      if (ageMs > deadAfterMs) {
+        // Distinct from 'draining' (alive but stressed) so the reaper
+        // can destroy it without conflating with demand-based scale-down.
+        runner.status = 'dead';
+      }
+    }
+  }
+
+  return runners;
 }
 
 async function scaleUp(count: number): Promise<void> {
@@ -295,9 +328,16 @@ async function scalingLoop(): Promise<void> {
     const currentCount = runners.length;
     const desired = calculateDesiredRunners(stats, currentCount, config);
 
-    // Track activity for idle timeout
+    // Track activity for idle timeout. TTL is 4x idleTimeoutSecs so the key
+    // outlives a normal idle window but doesn't accumulate forever in Redis
+    // if the scaler is later disabled.
     if (stats.total > 0) {
-      await redis.set(LAST_ACTIVITY_KEY, Date.now().toString());
+      await redis.set(
+        LAST_ACTIVITY_KEY,
+        Date.now().toString(),
+        'EX',
+        Math.max(60, config.idleTimeoutSecs * 4)
+      );
     }
 
     if (desired > currentCount) {
@@ -323,8 +363,11 @@ async function scalingLoop(): Promise<void> {
       );
     }
 
-    // Store runner state in Redis for API visibility
-    await redis.set(RUNNERS_KEY, JSON.stringify(runners), 'EX', 120);
+    // Store runner state in Redis for API visibility. TTL must outlive the
+    // poll interval — otherwise getScalerStatus reports an empty list during
+    // the gap between expiry and the next tick.
+    const runnersTtl = Math.max(120, config.pollIntervalSecs * 4);
+    await redis.set(RUNNERS_KEY, JSON.stringify(runners), 'EX', runnersTtl);
   } catch (err) {
     console.error('[Scaler] Error in scaling loop:', (err as Error).message);
   } finally {
@@ -334,17 +377,21 @@ async function scalingLoop(): Promise<void> {
 
 // ---- Public API ----
 
-/** Load scaler config from environment variables */
+/** Load scaler config from environment variables. Invalid integers (NaN,
+ * non-finite) fall back to the documented default rather than silently
+ * disabling comparisons downstream. */
 export function loadScalerConfig(): ScalerConfig {
+  const minRunners = Math.max(0, intEnv('SCALER_MIN_RUNNERS', 1));
+  const maxRunners = Math.max(minRunners, intEnv('SCALER_MAX_RUNNERS', 5));
   return {
     enabled: process.env.SCALER_ENABLED === 'true',
     provider: (process.env.SCALER_PROVIDER as ScalerConfig['provider']) || 'noop',
-    minRunners: parseInt(process.env.SCALER_MIN_RUNNERS || '1', 10),
-    maxRunners: parseInt(process.env.SCALER_MAX_RUNNERS || '5', 10),
-    scaleUpThreshold: parseInt(process.env.SCALER_SCALE_UP_THRESHOLD || '5', 10),
-    idleTimeoutSecs: parseInt(process.env.SCALER_IDLE_TIMEOUT_SECS || '600', 10),
-    pollIntervalSecs: parseInt(process.env.SCALER_POLL_INTERVAL_SECS || '30', 10),
-    runsPerRunner: parseInt(process.env.SCALER_RUNS_PER_RUNNER || '5', 10),
+    minRunners,
+    maxRunners,
+    scaleUpThreshold: intEnv('SCALER_SCALE_UP_THRESHOLD', 5),
+    idleTimeoutSecs: intEnv('SCALER_IDLE_TIMEOUT_SECS', 600),
+    pollIntervalSecs: Math.max(1, intEnv('SCALER_POLL_INTERVAL_SECS', 30)),
+    runsPerRunner: Math.max(1, intEnv('SCALER_RUNS_PER_RUNNER', 5)),
     runnerSize: process.env.SCALER_RUNNER_SIZE || 's-2vcpu-4gb',
     runnerRegion: process.env.SCALER_RUNNER_REGION || 'nyc1',
     sshKeyId: process.env.SCALER_SSH_KEY_ID || '',
@@ -385,6 +432,14 @@ export async function initScaler(): Promise<void> {
       `poll=${config.pollIntervalSecs}s idle=${config.idleTimeoutSecs}s`
   );
 
+  if (process.env.SCALER_INSECURE_TLS === 'true') {
+    console.warn(
+      '[Scaler] ⚠️  SCALER_INSECURE_TLS=true — runners will be created with ' +
+        'NODE_TLS_REJECT_UNAUTHORIZED=0. All outbound HTTPS from runners is ' +
+        'MITM-vulnerable. Only set this for trusted internal CAs.'
+    );
+  }
+
   // Run initial check
   await scalingLoop();
 
@@ -418,7 +473,7 @@ export async function getScalerStatus(): Promise<{
   const runners: RunnerInfo[] = runnersJson ? JSON.parse(runnersJson) : [];
 
   // Read live heartbeats
-  const heartbeatKeys = await redis.keys('runner:heartbeat:*');
+  const heartbeatKeys = await scanKeys('runner:heartbeat:*');
   const heartbeats: Record<string, unknown>[] = [];
   if (heartbeatKeys.length > 0) {
     const values = await redis.mget(...heartbeatKeys);

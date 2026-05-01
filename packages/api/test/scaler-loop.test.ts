@@ -21,12 +21,12 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
-const { queryMock, redisGet, redisSet, redisKeys, redisMget, noopCreate, noopDestroy, noopList } =
+const { queryMock, redisGet, redisSet, redisScan, redisMget, noopCreate, noopDestroy, noopList } =
   vi.hoisted(() => ({
     queryMock: vi.fn(),
     redisGet: vi.fn(),
     redisSet: vi.fn(),
-    redisKeys: vi.fn(),
+    redisScan: vi.fn(),
     redisMget: vi.fn(),
     noopCreate: vi.fn(),
     noopDestroy: vi.fn(),
@@ -41,10 +41,13 @@ vi.mock('../src/storage/redis.js', () => ({
   redis: {
     get: redisGet,
     set: redisSet,
-    keys: redisKeys,
+    scan: redisScan,
     mget: redisMget,
   },
 }));
+
+/** SCAN returns [cursor, keys]. Cursor='0' terminates the helper after one iteration. */
+const scanResult = (keys: string[]): [string, string[]] => ['0', keys];
 
 vi.mock('../src/scaler/providers/noop.js', () => ({
   NoopProvider: class {
@@ -88,7 +91,7 @@ describe('scaler loop', () => {
     vi.clearAllMocks();
 
     queryMock.mockResolvedValue({ rows: [] });
-    redisKeys.mockResolvedValue([]);
+    redisScan.mockResolvedValue(scanResult([]));
     redisMget.mockResolvedValue([]);
     redisGet.mockResolvedValue(null);
     redisSet.mockResolvedValue('OK');
@@ -167,7 +170,7 @@ describe('scaler loop', () => {
       // the RUNNING count still represents real work.
       queryMock.mockResolvedValue(dbRows({ ready: 0, running: 1 }));
       noopList.mockResolvedValue([makeRunner('r1')]);
-      redisKeys.mockResolvedValue(['runner:heartbeat:r1']);
+      redisScan.mockResolvedValue(scanResult(['runner:heartbeat:r1']));
       redisMget.mockResolvedValue([
         JSON.stringify({
           runnerId: 'r1',
@@ -194,11 +197,9 @@ describe('scaler loop', () => {
         makeRunner('r2', { createdAt: new Date(0) }),
         makeRunner('r3', { createdAt: new Date(0) }),
       ]);
-      redisKeys.mockResolvedValue([
-        'runner:heartbeat:r1',
-        'runner:heartbeat:r2',
-        'runner:heartbeat:r3',
-      ]);
+      redisScan.mockResolvedValue(
+        scanResult(['runner:heartbeat:r1', 'runner:heartbeat:r2', 'runner:heartbeat:r3'])
+      );
       redisMget.mockResolvedValue([
         JSON.stringify({
           runnerId: 'r1',
@@ -241,7 +242,7 @@ describe('scaler loop', () => {
       noopList.mockResolvedValue([
         makeRunner('stuck-runner', { createdAt: new Date(Date.now() - 300_000) }), // 5min old, no heartbeat
       ]);
-      redisKeys.mockResolvedValue([]); // no heartbeat
+      redisScan.mockResolvedValue(scanResult([])); // no heartbeat
       redisGet.mockResolvedValue(String(Date.now() - 60_000)); // idle timeout NOT yet passed
 
       await initScaler();
@@ -256,7 +257,7 @@ describe('scaler loop', () => {
       noopList.mockResolvedValue([
         makeRunner('booting-runner', { createdAt: new Date(Date.now() - 30_000) }), // 30s old, still booting
       ]);
-      redisKeys.mockResolvedValue([]); // heartbeat hasn't appeared yet
+      redisScan.mockResolvedValue(scanResult([])); // heartbeat hasn't appeared yet
       redisGet.mockResolvedValue(String(Date.now() - 60_000));
 
       await initScaler();
@@ -269,7 +270,7 @@ describe('scaler loop', () => {
       // possibly recovering. Reaping these would kill viable runners.
       queryMock.mockResolvedValue({ rows: [] });
       noopList.mockResolvedValue([makeRunner('stressed-runner')]);
-      redisKeys.mockResolvedValue(['runner:heartbeat:stressed-runner']);
+      redisScan.mockResolvedValue(scanResult(['runner:heartbeat:stressed-runner']));
       redisMget.mockResolvedValue([
         JSON.stringify({
           runnerId: 'stressed-runner',
@@ -294,7 +295,7 @@ describe('scaler loop', () => {
         makeRunner('dead-1', { createdAt: new Date(Date.now() - 300_000) }),
         makeRunner('alive-1'),
       ]);
-      redisKeys.mockResolvedValue(['runner:heartbeat:alive-1']);
+      redisScan.mockResolvedValue(scanResult(['runner:heartbeat:alive-1']));
       redisMget.mockResolvedValue([
         JSON.stringify({
           runnerId: 'alive-1',
@@ -321,7 +322,7 @@ describe('scaler loop', () => {
       noopList.mockResolvedValue([
         makeRunner('zombie', { createdAt: new Date(Date.now() - 300_000) }),
       ]);
-      redisKeys.mockResolvedValue([]);
+      redisScan.mockResolvedValue(scanResult([]));
       noopDestroy.mockRejectedValueOnce(new Error('transient API failure'));
 
       // Should not throw out of initScaler
@@ -342,7 +343,7 @@ describe('scaler loop', () => {
       noopList.mockResolvedValue([
         makeRunner('failed-reap', { createdAt: new Date(Date.now() - 300_000) }),
       ]);
-      redisKeys.mockResolvedValue([]); // no heartbeat → marked 'dead'
+      redisScan.mockResolvedValue(scanResult([])); // no heartbeat → marked 'dead'
       noopDestroy.mockRejectedValueOnce(new Error('transient API failure'));
 
       await initScaler();
