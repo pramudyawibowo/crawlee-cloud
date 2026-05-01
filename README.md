@@ -103,12 +103,12 @@ The API server starts at `http://localhost:3000`.
 
 Deploy your own instance in minutes:
 
-| Method                                                                                                                                                                               | Description                                  |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------- |
-| [![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new/template?template=https://github.com/crawlee-cloud/crawlee-cloud&referralCode=crawlee)                | One-click deploy with managed databases      |
-| [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/crawlee-cloud/crawlee-cloud)                          | Free tier available                          |
-| [![Deploy to DO](https://www.deploytodo.com/do-btn-blue.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/crawlee-cloud/crawlee-cloud/tree/main&refcode=crawlee) | DigitalOcean App Platform                    |
-| [VPS Deploy Script](deploy/)                                                                                                                                                         | Full stack on any Ubuntu VPS with auto-HTTPS |
+| Method                                                                                                                                                                               | Status         | Description                                                            |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------- | ---------------------------------------------------------------------- |
+| [![Deploy to DO](https://www.deploytodo.com/do-btn-blue.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/crawlee-cloud/crawlee-cloud/tree/main&refcode=crawlee) | ✅ Supported   | Automated full stack — App Platform, managed PG/Redis, Runner Droplet  |
+| [VPS Deploy Script](deploy/vps/)                                                                                                                                                     | ✅ Supported   | Full stack on any Ubuntu VPS with auto-HTTPS via Caddy                 |
+| Railway                                                                                                                                                                              | 🚧 Coming soon | One-click PaaS deploy (template scaffolding present, not yet verified) |
+| Render                                                                                                                                                                               | 🚧 Coming soon | One-click PaaS deploy (blueprint present, not yet verified)            |
 
 See [deploy/](deploy/) for detailed instructions.
 
@@ -168,6 +168,18 @@ See [deploy/](deploy/) for detailed instructions.
 | Request Queues                               | ✅ Supported |
 | Request deduplication                        | ✅ Supported |
 | Distributed locking                          | ✅ Supported |
+| Builds & versioning                          | ✅ Supported |
+| Webhooks                                     | ✅ Supported |
+| Schedules                                    | ✅ Supported |
+| Auto-scaling runners (local Docker, GHCR)    | ✅ Supported |
+
+---
+
+## What's New
+
+**v0.8.0** — auto-scaling with image registry support, build versioning, scale-aware run pagination, CLI profiles + `crc info`, dashboard rewrite (Builds, Schedules, Webhooks, Request Queues, Runners, KV browser). See the [full changelog](CHANGELOG.md).
+
+> ⚠️ **Upgrading from v0.7?** `GET /metrics` and `GET /v2/scaler/status` are now admin-only. If you scrape `/metrics` with Prometheus, send an admin token in the `Authorization` header, or set `METRICS_PUBLIC=true`. See [CHANGELOG → 0.8.0 Breaking](CHANGELOG.md#080---2026-05-01).
 
 ---
 
