@@ -120,6 +120,17 @@ CREATE TABLE IF NOT EXISTS runs (
   modified_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Runs list/triage indexes. Without these, the dashboard's runs page does
+-- a seq scan over the entire table on every load — at 280 runs/day that's
+-- thousands of rows per month per user. Composite indexes are ordered to
+-- match the GET /v2/actor-runs query: WHERE user_id = ? AND ... ORDER BY created_at DESC.
+CREATE INDEX IF NOT EXISTS idx_runs_user_created
+  ON runs(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_runs_user_status_created
+  ON runs(user_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_runs_user_actor_created
+  ON runs(user_id, actor_id, created_at DESC);
+
 -- Webhooks
 CREATE TABLE IF NOT EXISTS webhooks (
   id VARCHAR(21) PRIMARY KEY,
@@ -172,6 +183,18 @@ CREATE TABLE IF NOT EXISTS actor_versions (
   -- Each actor can only have one of each version number
   UNIQUE(actor_id, version_number)
 );
+
+-- A given build_tag (e.g. "latest", "beta") may only point at ONE version
+-- per actor at a time. A partial index excludes NULL tags (untagged
+-- versions are normal) but enforces uniqueness for any actively-set tag.
+-- This is the DB-level invariant that makes "current pointer" semantics
+-- ironclad against:
+--   (a) concurrent push races where two writers' clear-then-set CTEs
+--       interleave and both end up holding the tag,
+--   (b) any code path that bypasses findOrCreateActorVersion and writes
+--       build_tag directly (e.g. the POST /v2/acts/:id/versions route).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_actor_versions_actor_tag
+  ON actor_versions(actor_id, build_tag) WHERE build_tag IS NOT NULL;
 
 -- Actor Builds (build history)
 CREATE TABLE IF NOT EXISTS actor_builds (

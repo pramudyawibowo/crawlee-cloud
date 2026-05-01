@@ -22,6 +22,129 @@ interface ActorRow {
   modified_at: Date;
 }
 
+/**
+ * Find or create the actor_versions row for a given (actor, version) pair.
+ * Apify's data model:
+ *   - version (e.g. "0.0", "1.2") = immutable source-version concept,
+ *     matching .actor/actor.json `version`
+ *   - build_tag (e.g. "latest", "beta") = mutable pointer to a specific
+ *     build of that version. Running `actor:latest` resolves through the
+ *     tag to the underlying build, so the tag is the "current pointer"
+ *     while builds accumulate as immutable history.
+ *
+ * Default tag is "latest" — same convention Docker uses, and what users
+ * implicitly want when they run an actor without specifying a tag.
+ */
+async function findOrCreateActorVersion(
+  actorId: string,
+  versionNumber: string,
+  buildTag = 'latest'
+): Promise<string | null> {
+  // The tag is a single moving pointer per actor. Claiming it must
+  // happen for BOTH paths — newly created versions AND existing ones
+  // being re-pushed (rollback). Otherwise pushing v1 after v2 leaves
+  // current_version_id=v1 but build_tag=latest still on v2 — two
+  // sources of truth disagreeing on which build is current. Tests for
+  // this in test/integration/runs-list and the codex review on PR #18
+  // both flagged it.
+  //
+  // We claim-and-clear in a single statement so the tag is never on
+  // zero versions or two simultaneously.
+  const existing = await query<{ id: string }>(
+    `WITH cleared AS (
+       UPDATE actor_versions SET build_tag = NULL
+       WHERE actor_id = $1 AND build_tag = $3 AND version_number <> $2
+     )
+     UPDATE actor_versions SET build_tag = $3
+     WHERE actor_id = $1 AND version_number = $2
+     RETURNING id`,
+    [actorId, versionNumber, buildTag]
+  );
+  if (existing.rows[0]) return existing.rows[0].id;
+
+  // Version doesn't exist yet — insert claiming the tag, clearing siblings.
+  const id = nanoid();
+  const inserted = await query<{ id: string }>(
+    `WITH cleared AS (
+       UPDATE actor_versions SET build_tag = NULL
+       WHERE actor_id = $2 AND build_tag = $4 AND version_number <> $3
+     )
+     INSERT INTO actor_versions (id, actor_id, version_number, build_tag)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (actor_id, version_number) DO UPDATE SET version_number = EXCLUDED.version_number
+     RETURNING id`,
+    [id, actorId, versionNumber, buildTag]
+  );
+  return inserted.rows[0]?.id ?? null;
+}
+
+/**
+ * Record a SUCCEEDED build row whenever an actor is registered/updated with
+ * a new (version, image) combination. This captures the *deploy event* — the
+ * CLI built the image locally and is now telling the platform "this image
+ * is version X". Populates the dashboard's /builds page.
+ *
+ * Dedup key: (version_number, image_name). Same version + same image is
+ * idempotent (no row); same version + new image is a rebuild (new row under
+ * the existing version); new version is its own version row + first build.
+ *
+ * Falls back to "no version" when the CLI didn't send one — the build still
+ * gets recorded, just with `version_id = NULL`. That keeps backward compat
+ * for any caller still on the older payload shape.
+ *
+ * Best-effort: failures are logged and swallowed. The actor upsert is the
+ * user's actual intent; a missing build row is a UI nicety, not a
+ * correctness issue.
+ */
+async function recordBuildIfNew(
+  actorId: string,
+  defaultRunOptions: unknown,
+  versionNumber: string | undefined,
+  log: (msg: string) => void = () => undefined
+): Promise<void> {
+  if (!defaultRunOptions || typeof defaultRunOptions !== 'object') return;
+  const imageName = (defaultRunOptions as { image?: unknown }).image;
+  if (typeof imageName !== 'string' || imageName.length === 0) return;
+
+  try {
+    const versionId = versionNumber ? await findOrCreateActorVersion(actorId, versionNumber) : null;
+
+    // Dedup: skip if the most recent build for this actor already matches
+    // both image and version. Older builds (different versions) stay on
+    // record so the page shows full history.
+    const existing = await query<{ image_name: string | null; version_id: string | null }>(
+      `SELECT image_name, version_id FROM actor_builds
+       WHERE actor_id = $1
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [actorId]
+    );
+    const last = existing.rows[0];
+    if (last && last.image_name === imageName && (last.version_id ?? null) === versionId) {
+      return;
+    }
+
+    await query(
+      `INSERT INTO actor_builds
+         (id, actor_id, version_id, status, image_name, started_at, finished_at)
+       VALUES ($1, $2, $3, 'SUCCEEDED', $4, NOW(), NOW())`,
+      [nanoid(), actorId, versionId, imageName]
+    );
+
+    // Bubble the most-recent version up to the actor row so consumers
+    // (dashboard, runner) can find "the current source version" without
+    // joining through builds.
+    if (versionId) {
+      await query(`UPDATE actors SET current_version_id = $1, modified_at = NOW() WHERE id = $2`, [
+        versionId,
+        actorId,
+      ]);
+    }
+  } catch (err) {
+    log(`recordBuildIfNew failed for ${actorId}: ${(err as Error).message}`);
+  }
+}
+
 export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.addHook('preHandler', authenticate);
 
@@ -58,7 +181,7 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
       retryDelaySecs?: number;
     };
   }>('/acts', async (request, reply) => {
-    const { name, title, description, defaultRunOptions, maxRetries, retryDelaySecs } =
+    const { name, title, description, defaultRunOptions, maxRetries, retryDelaySecs, version } =
       CreateActorSchema.parse(request.body);
 
     // Check if actor with this name already exists for this user
@@ -90,6 +213,13 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
         ]
       );
 
+      // Record the deploy if the CLI sent a new image reference.
+      await recordBuildIfNew(
+        result.rows[0]!.id,
+        defaultRunOptions ?? existing.rows[0].default_run_options,
+        version,
+        (m) => fastify.log.warn(m)
+      );
       return { data: formatActor(result.rows[0]!) };
     }
 
@@ -113,6 +243,7 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
       ]
     );
 
+    await recordBuildIfNew(id, defaultRunOptions, version, (m) => fastify.log.warn(m));
     reply.status(201);
     return { data: formatActor(result.rows[0]!) };
   });
@@ -200,6 +331,15 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
     if (!result.rows[0]) {
       reply.status(404);
       return { error: { type: 'record-not-found', message: 'Actor not found' } };
+    }
+
+    if (updates.defaultRunOptions !== undefined || updates.version !== undefined) {
+      await recordBuildIfNew(
+        result.rows[0].id,
+        updates.defaultRunOptions ?? result.rows[0].default_run_options,
+        updates.version,
+        (m) => fastify.log.warn(m)
+      );
     }
 
     return { data: formatActor(result.rows[0]) };
