@@ -295,4 +295,333 @@ describe('Webhook Routes', () => {
       expect(body.data.limit).toBe(5);
     });
   });
+
+  describe('POST /v2/webhooks/:webhookId/test', () => {
+    // Stub global fetch so we don't actually hit any URL during tests.
+    const originalFetch = global.fetch;
+    let fetchMock: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      fetchMock = vi.fn();
+      global.fetch = fetchMock as unknown as typeof global.fetch;
+    });
+
+    afterAll(() => {
+      global.fetch = originalFetch;
+    });
+
+    it('returns DELIVERED with the response status when receiver accepts the test event', async () => {
+      mockQuery
+        .mockResolvedValueOnce({ rows: [createWebhookRow()] }) // ownership lookup
+        .mockResolvedValueOnce({
+          rows: [
+            createDeliveryRow({ status: 'PENDING', response_status: null, response_body: null }),
+          ],
+        }) // INSERT ... RETURNING (initial PENDING row)
+        .mockResolvedValueOnce({
+          rows: [
+            createDeliveryRow({ status: 'DELIVERED', response_status: 200, response_body: 'ok' }),
+          ],
+        }); // UPDATE ... RETURNING (final DELIVERED row)
+
+      fetchMock.mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: async () => 'ok',
+      } as Response);
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v2/webhooks/webhook-1/test',
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body) as {
+        data: { status: string; responseStatus: number };
+      };
+      expect(body.data.status).toBe('DELIVERED');
+      expect(body.data.responseStatus).toBe(200);
+      expect(fetchMock).toHaveBeenCalledOnce();
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('https://example.com/hook');
+      const payload = JSON.parse(init.body as string) as { test: boolean; eventType: string };
+      // Test payload must self-identify so receivers can opt out of side effects.
+      expect(payload.test).toBe(true);
+      expect(payload.eventType).toBe('ACTOR.RUN.SUCCEEDED');
+    });
+
+    it('returns FAILED with the receiver error body when delivery returns non-2xx', async () => {
+      mockQuery
+        .mockResolvedValueOnce({ rows: [createWebhookRow()] })
+        .mockResolvedValueOnce({ rows: [createDeliveryRow({ status: 'PENDING' })] })
+        .mockResolvedValueOnce({
+          rows: [
+            createDeliveryRow({
+              status: 'FAILED',
+              response_status: 503,
+              response_body: 'service unavailable',
+            }),
+          ],
+        });
+
+      fetchMock.mockResolvedValue({
+        ok: false,
+        status: 503,
+        text: async () => 'service unavailable',
+      } as Response);
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v2/webhooks/webhook-1/test',
+      });
+
+      // Use 502 to signal "test fired but the receiver rejected it" — distinct
+      // from 200 (success) and 5xx-on-our-side (we didn't even reach them).
+      expect(response.statusCode).toBe(502);
+      const body = JSON.parse(response.body) as {
+        data: { status: string; responseStatus: number; responseBody: string };
+      };
+      expect(body.data.status).toBe('FAILED');
+      expect(body.data.responseStatus).toBe(503);
+      expect(body.data.responseBody).toBe('service unavailable');
+    });
+
+    it('blocks private/loopback URLs without sending the request', async () => {
+      mockQuery
+        .mockResolvedValueOnce({
+          rows: [createWebhookRow({ request_url: 'http://localhost:9999/hook' })],
+        })
+        .mockResolvedValueOnce({ rows: [createDeliveryRow({ status: 'PENDING' })] })
+        .mockResolvedValueOnce({
+          rows: [
+            createDeliveryRow({
+              status: 'FAILED',
+              response_status: null,
+              response_body: 'Webhook URL targets a private/internal network address',
+            }),
+          ],
+        });
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v2/webhooks/webhook-1/test',
+      });
+
+      expect(response.statusCode).toBe(502);
+      // Critical: fetch must NOT be called for private targets — that's what
+      // makes the SSRF guard meaningful, not the resulting status row.
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('returns 404 when the webhook is owned by a different user', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [] }); // ownership check fails
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v2/webhooks/foreign/test',
+      });
+
+      expect(response.statusCode).toBe(404);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('uses the requested eventType from the body when subscribed', async () => {
+      // Multi-event webhook with [SUCCEEDED, FAILED]. Test that requesting
+      // FAILED specifically picks FAILED, not the first event (SUCCEEDED).
+      const subscribed = ['ACTOR.RUN.SUCCEEDED', 'ACTOR.RUN.FAILED'];
+      mockQuery
+        .mockResolvedValueOnce({ rows: [createWebhookRow({ event_types: subscribed })] })
+        .mockResolvedValueOnce({
+          rows: [createDeliveryRow({ status: 'PENDING', event_type: 'ACTOR.RUN.FAILED' })],
+        })
+        .mockResolvedValueOnce({
+          rows: [
+            createDeliveryRow({
+              status: 'DELIVERED',
+              event_type: 'ACTOR.RUN.FAILED',
+              response_status: 200,
+              response_body: 'ok',
+            }),
+          ],
+        });
+      fetchMock.mockResolvedValue({ ok: true, status: 200, text: async () => 'ok' } as Response);
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v2/webhooks/webhook-1/test',
+        payload: { eventType: 'ACTOR.RUN.FAILED' },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body) as { data: { eventType: string } };
+      expect(body.data.eventType).toBe('ACTOR.RUN.FAILED');
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      const payload = JSON.parse(init.body as string) as { eventType: string };
+      expect(payload.eventType).toBe('ACTOR.RUN.FAILED');
+    });
+
+    it('synthetic test payload has the Apify-compatible shape with a full resource block', async () => {
+      // Locks the wire contract receivers depend on. KEEP IN SYNC with the
+      // runner's attemptWebhookDelivery default payload (queue.ts) — both
+      // endpoints must produce the same shape so receivers tested with the
+      // dashboard work in production unchanged.
+      const subscribed = ['ACTOR.RUN.SUCCEEDED'];
+      mockQuery
+        .mockResolvedValueOnce({
+          rows: [createWebhookRow({ event_types: subscribed, user_id: 'owner-123' })],
+        })
+        .mockResolvedValueOnce({ rows: [createDeliveryRow({ status: 'PENDING' })] })
+        .mockResolvedValueOnce({
+          rows: [createDeliveryRow({ status: 'DELIVERED', response_status: 200 })],
+        });
+      fetchMock.mockResolvedValue({ ok: true, status: 200, text: async () => 'ok' } as Response);
+
+      await app.inject({
+        method: 'POST',
+        url: '/v2/webhooks/webhook-1/test',
+        payload: { eventType: 'ACTOR.RUN.SUCCEEDED' },
+      });
+
+      const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+      const sent = JSON.parse(init.body as string) as Record<string, unknown>;
+
+      // Top-level shape (Apify webhook docs)
+      expect(sent).toMatchObject({
+        userId: 'owner-123',
+        eventType: 'ACTOR.RUN.SUCCEEDED',
+        test: true,
+      });
+      expect(sent.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+      expect(sent.eventData).toMatchObject({
+        actorId: expect.any(String),
+        actorRunId: expect.any(String),
+      });
+
+      // Resource block — full run context. Receivers branch on these fields.
+      const resource = sent.resource as Record<string, unknown>;
+      expect(resource).toMatchObject({
+        id: expect.any(String),
+        actId: expect.any(String),
+        userId: 'owner-123',
+        status: 'SUCCEEDED',
+        defaultDatasetId: expect.stringMatching(/^test-dataset-/),
+        defaultKeyValueStoreId: expect.stringMatching(/^test-kv-/),
+        defaultRequestQueueId: expect.stringMatching(/^test-rq-/),
+        options: { timeoutSecs: 3600, memoryMbytes: 1024 },
+        exitCode: 0, // SUCCEEDED → exit 0
+        stats: {
+          inputBodyLen: 0,
+          restartCount: 0,
+          resurrectCount: 0,
+          runTimeSecs: expect.any(Number),
+          computeUnits: 0,
+        },
+      });
+      expect(resource.startedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+      expect(resource.finishedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    });
+
+    it('exitCode reflects the eventType for terminal states', async () => {
+      // FAILED/TIMED-OUT/ABORTED → non-zero exit. SUCCEEDED → 0. RUNNING → null.
+      const cases = [
+        { eventType: 'ACTOR.RUN.SUCCEEDED', expectedExit: 0 },
+        { eventType: 'ACTOR.RUN.FAILED', expectedExit: 1 },
+        { eventType: 'ACTOR.RUN.TIMED-OUT', expectedExit: 1 },
+        { eventType: 'ACTOR.RUN.ABORTED', expectedExit: 1 },
+      ];
+      for (const { eventType, expectedExit } of cases) {
+        mockQuery
+          .mockResolvedValueOnce({ rows: [createWebhookRow({ event_types: [eventType] })] })
+          .mockResolvedValueOnce({ rows: [createDeliveryRow({ status: 'PENDING' })] })
+          .mockResolvedValueOnce({
+            rows: [createDeliveryRow({ status: 'DELIVERED', response_status: 200 })],
+          });
+        fetchMock.mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          text: async () => 'ok',
+        } as Response);
+
+        await app.inject({
+          method: 'POST',
+          url: '/v2/webhooks/webhook-1/test',
+          payload: { eventType },
+        });
+        const init = fetchMock.mock.calls.at(-1)?.[1] as RequestInit;
+        const sent = JSON.parse(init.body as string) as { resource: { exitCode: number | null } };
+        expect(sent.resource.exitCode).toBe(expectedExit);
+      }
+    });
+
+    it('resource.status matches the requested eventType across all terminal states', async () => {
+      // Regression: status used to be hardcoded to 'SUCCEEDED' regardless of
+      // eventType, so a FAILED test fired an inconsistent payload at the
+      // receiver (eventType=FAILED, status=SUCCEEDED). Status now lives in
+      // resource.status (Apify-compat shape), and is derived from eventType.
+      const cases: { eventType: string; expectedStatus: string }[] = [
+        { eventType: 'ACTOR.RUN.FAILED', expectedStatus: 'FAILED' },
+        { eventType: 'ACTOR.RUN.TIMED-OUT', expectedStatus: 'TIMED-OUT' },
+        { eventType: 'ACTOR.RUN.ABORTED', expectedStatus: 'ABORTED' },
+        { eventType: 'ACTOR.RUN.SUCCEEDED', expectedStatus: 'SUCCEEDED' },
+      ];
+
+      for (const { eventType, expectedStatus } of cases) {
+        mockQuery
+          .mockResolvedValueOnce({ rows: [createWebhookRow({ event_types: [eventType] })] })
+          .mockResolvedValueOnce({
+            rows: [createDeliveryRow({ status: 'PENDING', event_type: eventType })],
+          })
+          .mockResolvedValueOnce({
+            rows: [
+              createDeliveryRow({
+                status: 'DELIVERED',
+                event_type: eventType,
+                response_status: 200,
+              }),
+            ],
+          });
+        fetchMock.mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          text: async () => 'ok',
+        } as Response);
+
+        const response = await app.inject({
+          method: 'POST',
+          url: '/v2/webhooks/webhook-1/test',
+          payload: { eventType },
+        });
+
+        expect(response.statusCode).toBe(200);
+        const init = fetchMock.mock.calls.at(-1)?.[1] as RequestInit;
+        const sentPayload = JSON.parse(init.body as string) as {
+          eventType: string;
+          resource: { status: string };
+        };
+        expect(sentPayload.eventType).toBe(eventType);
+        expect(sentPayload.resource.status).toBe(expectedStatus);
+      }
+    });
+
+    it('rejects an eventType the webhook is not subscribed to', async () => {
+      // Receivers shouldn't have to handle events the platform "promised" not
+      // to send them. The test endpoint enforces subscription scope.
+      mockQuery.mockResolvedValueOnce({
+        rows: [createWebhookRow({ event_types: ['ACTOR.RUN.SUCCEEDED'] })],
+      });
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v2/webhooks/webhook-1/test',
+        payload: { eventType: 'ACTOR.BUILD.FAILED' },
+      });
+
+      expect(response.statusCode).toBe(400);
+      const body = JSON.parse(response.body) as { error: { type: string; message: string } };
+      expect(body.error.type).toBe('invalid-event-type');
+      expect(body.error.message).toContain('ACTOR.BUILD.FAILED');
+      expect(body.error.message).toContain('ACTOR.RUN.SUCCEEDED');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+  });
 });

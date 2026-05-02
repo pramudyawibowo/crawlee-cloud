@@ -155,16 +155,29 @@ export interface ScalerStatus {
   config: { min: number; max: number; runsPerRunner: number };
 }
 
+/**
+ * Wire shape returned by GET /v2/webhooks/:id/deliveries and
+ * POST /v2/webhooks/:id/test. Field names mirror the API's `formatDelivery`
+ * helper exactly — earlier this type used `statusCode` / `errorMessage` /
+ * `deliveredAt` (none of which the API ever returned), so every row in the
+ * dashboard rendered as undefined.
+ */
 export interface WebhookDelivery {
   id: string;
   webhookId: string;
+  runId: string | null;
   eventType: string;
-  statusCode: number | null;
-  responseBody?: string | null;
-  errorMessage?: string | null;
+  /** 'PENDING' | 'DELIVERED' | 'FAILED' — uppercase, matches the DB enum */
+  status: string;
   attemptCount: number;
-  deliveredAt: string | null;
+  maxAttempts: number;
+  nextRetryAt: string | null;
+  /** HTTP response status from the receiver, null on network error */
+  responseStatus: number | null;
+  /** First 1024 chars of the response body OR the error message on a network failure */
+  responseBody: string | null;
   createdAt: string;
+  finishedAt: string | null;
 }
 
 export interface Dataset {
@@ -315,6 +328,44 @@ export async function downloadAsBlob(endpoint: string, filename: string): Promis
  * S3, so the browser can open it without any auth — no API server in the
  * data path. Returns null if the record doesn't exist.
  */
+/**
+ * Fetch the raw bytes of a KV record, capped at `maxBytes` to keep the
+ * dashboard out of trouble when an actor has stored an 800 KB session pool
+ * or a 5 MB HTML snapshot. Returns the text (decoded as UTF-8 — works for
+ * JSON, plain text, logs; returns garbled output for binary which the
+ * caller can detect and offer the "view full" path instead).
+ *
+ * `truncated` tells the caller whether more content exists beyond what
+ * was returned — separate from the parse-success of the body itself.
+ */
+export async function fetchKVRecordContent(
+  storeId: string,
+  key: string,
+  maxBytes = 8192
+): Promise<{ text: string; truncated: boolean; size: number; contentType: string } | null> {
+  const token = getToken();
+  const res = await fetch(
+    `${API_URL}/v2/key-value-stores/${storeId}/records/${encodeURIComponent(key)}`,
+    { headers: token ? { Authorization: `Bearer ${token}` } : {} }
+  );
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+  const blob = await res.blob();
+  const size = blob.size;
+  const truncated = size > maxBytes;
+  // Slice in the *Blob* before decoding so we don't load 5MB into a string
+  // just to throw away most of it. Slicing a Blob is constant-time.
+  const slice = truncated ? blob.slice(0, maxBytes) : blob;
+  const text = await slice.text();
+  return {
+    text,
+    truncated,
+    size,
+    contentType: res.headers.get('content-type') ?? 'application/octet-stream',
+  };
+}
+
 export async function getKVRecordPresignedUrl(
   storeId: string,
   key: string
@@ -387,6 +438,32 @@ export async function createApiKey(
 
 export async function revokeApiKey(id: string): Promise<void> {
   await fetchApi(`/v2/auth/api-keys/${id}`, { method: 'DELETE' });
+}
+
+// System info — aggregate for the Settings page (version, storage health,
+// execution defaults, scaler state). One call, fewer round trips.
+
+export interface StorageCheck {
+  status: 'ok' | 'error';
+  latencyMs?: number;
+  error?: string;
+}
+
+export interface SystemInfo {
+  version: string;
+  nodeVersion: string;
+  storage: { db: StorageCheck; redis: StorageCheck; s3: StorageCheck };
+  executionDefaults: {
+    maxConcurrentRuns: number;
+    defaultMemoryMb: number;
+    defaultTimeoutSecs: number;
+  };
+  scaler: { enabled: boolean; provider: string; minRunners: number; maxRunners: number };
+}
+
+export async function getSystemInfo(): Promise<SystemInfo> {
+  const res = await fetchApi<{ data: SystemInfo }>('/v2/system/info');
+  return res.data;
 }
 
 // Runs
@@ -897,12 +974,33 @@ export async function getScalerStatus(): Promise<ScalerStatus> {
 }
 
 export async function getWebhookDeliveries(id: string): Promise<WebhookDelivery[]> {
-  try {
-    const res = await fetchApi<{ data: { items: WebhookDelivery[] } }>(
-      `/v2/webhooks/${id}/dispatches`
-    );
-    return res.data.items;
-  } catch {
-    return [];
-  }
+  // API path is /deliveries (was previously calling /dispatches and swallowing
+  // the 404, which made the deliveries list silently empty).
+  const res = await fetchApi<{ data: { items: WebhookDelivery[] } }>(
+    `/v2/webhooks/${id}/deliveries`
+  );
+  return res.data.items;
+}
+
+/**
+ * Fire a synthetic event at the webhook's URL — one shot, no retries, 10s
+ * timeout. The response includes the resulting delivery row so the UI can
+ * render the result inline without polling.
+ */
+/**
+ * Fire a synthetic event at the webhook's URL. When `eventType` is omitted
+ * the API uses the first event the webhook is subscribed to. To exercise
+ * every subscribed event call once per event in parallel — see the Webhooks
+ * page handler for the multi-event flow.
+ */
+export async function testWebhook(id: string, eventType?: string): Promise<WebhookDelivery> {
+  // Send an empty JSON object as the body — fetchApi sets
+  // `Content-Type: application/json` by default, and Fastify's JSON
+  // parser rejects empty bodies under that content-type with
+  // "Body cannot be empty when content-type is set to 'application/json'".
+  const res = await fetchApi<{ data: WebhookDelivery }>(`/v2/webhooks/${id}/test`, {
+    method: 'POST',
+    body: JSON.stringify(eventType ? { eventType } : {}),
+  });
+  return res.data;
 }

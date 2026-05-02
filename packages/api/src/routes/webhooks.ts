@@ -252,7 +252,298 @@ export const webhooksRoutes: FastifyPluginAsync = async (fastify) => {
       },
     };
   });
+
+  /**
+   * POST /v2/webhooks/:webhookId/test
+   *
+   * Fire a synthetic event at the webhook's configured URL — one shot, no
+   * retries, 10s timeout. Records a row in `webhook_deliveries` with the
+   * outcome so the test shows up in the same history the dashboard already
+   * displays. The synthetic payload sets `test: true` and uses sentinel run
+   * IDs so receivers can opt-out of side effects.
+   *
+   * Body (all optional):
+   *   - eventType: string — pick a specific event the webhook is subscribed
+   *     to. Useful when receivers branch by event (e.g. SUCCEEDED routes to
+   *     a queue, FAILED posts to Slack). When omitted, defaults to the
+   *     first configured event. To exercise *every* subscribed event the
+   *     dashboard makes one parallel call per event with this field set.
+   *
+   * Synchronous: the response includes the delivery row so the UI can show
+   * the result immediately without polling.
+   */
+  fastify.post<{
+    Params: { webhookId: string };
+    Body: { eventType?: string } | undefined;
+  }>('/webhooks/:webhookId/test', async (request, reply) => {
+    const { webhookId } = request.params;
+
+    const webhookResult = await query<WebhookRow>(
+      'SELECT * FROM webhooks WHERE id = $1 AND user_id = $2',
+      [webhookId, request.user!.id]
+    );
+    const webhook = webhookResult.rows[0];
+    if (!webhook) {
+      reply.status(404);
+      return { error: { type: 'record-not-found', message: 'Webhook not found' } };
+    }
+
+    // Default: first configured event. Override: any event the webhook is
+    // subscribed to. Reject events the webhook isn't subscribed to so test
+    // results match what the receiver would actually see in production —
+    // receivers shouldn't have to handle events the platform "promised" not
+    // to send them.
+    const requestedEvent = request.body?.eventType;
+    let eventType: string;
+    if (requestedEvent) {
+      if (!webhook.event_types.includes(requestedEvent)) {
+        reply.status(400);
+        return {
+          error: {
+            type: 'invalid-event-type',
+            message: `Webhook is not subscribed to "${requestedEvent}". Subscribed: ${webhook.event_types.join(', ')}`,
+          },
+        };
+      }
+      eventType = requestedEvent;
+    } else {
+      eventType = webhook.event_types[0] ?? 'ACTOR.RUN.SUCCEEDED';
+    }
+
+    const deliveryId = nanoid();
+    const result = await deliverTestWebhook(deliveryId, webhook, eventType);
+
+    const formatted = formatDelivery(result);
+    reply.status(result.status === 'DELIVERED' ? 200 : 502);
+    return { data: formatted };
+  });
 };
+
+/**
+ * Apify-compatible webhook payload shape. Receivers reading documentation at
+ * https://docs.apify.com/platform/integrations/webhooks expect this exact
+ * structure, especially the `resource` block — that's where serious receivers
+ * pull the full run context from (ids, status, timestamps, exit code, stats).
+ *
+ * Kept here AND mirrored in the runner's attemptWebhookDelivery default —
+ * the snapshot test in webhooks.test.ts locks the shape so the two stay
+ * aligned. The fields below are the minimum viable rich payload; expand
+ * here when receivers need new fields.
+ */
+export interface WebhookRun {
+  id: string;
+  actorId: string;
+  userId: string;
+  status: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  defaultDatasetId: string | null;
+  defaultKeyValueStoreId: string | null;
+  defaultRequestQueueId: string | null;
+  timeoutSecs: number;
+  memoryMbytes: number;
+  buildId: string | null;
+  buildNumber: string | null;
+  exitCode: number | null;
+  stats: {
+    inputBodyLen: number;
+    restartCount: number;
+    resurrectCount: number;
+    runTimeSecs: number;
+    computeUnits: number;
+  };
+}
+
+export interface WebhookPayload {
+  userId: string;
+  createdAt: string;
+  eventType: string;
+  eventData: { actorId: string; actorRunId: string };
+  resource: {
+    id: string;
+    actId: string; // Apify alias for actorId
+    userId: string;
+    status: string;
+    startedAt: string | null;
+    finishedAt: string | null;
+    defaultDatasetId: string | null;
+    defaultKeyValueStoreId: string | null;
+    defaultRequestQueueId: string | null;
+    options: { timeoutSecs: number; memoryMbytes: number };
+    buildId: string | null;
+    buildNumber: string | null;
+    exitCode: number | null;
+    stats: WebhookRun['stats'];
+  };
+  /** Marker so receivers can no-op side effects on test deliveries. */
+  test?: boolean;
+}
+
+export function buildWebhookPayload(
+  eventType: string,
+  run: WebhookRun,
+  options: { test?: boolean } = {}
+): WebhookPayload {
+  const payload: WebhookPayload = {
+    userId: run.userId,
+    createdAt: new Date().toISOString(),
+    eventType,
+    eventData: { actorId: run.actorId, actorRunId: run.id },
+    resource: {
+      id: run.id,
+      actId: run.actorId,
+      userId: run.userId,
+      status: run.status,
+      startedAt: run.startedAt,
+      finishedAt: run.finishedAt,
+      defaultDatasetId: run.defaultDatasetId,
+      defaultKeyValueStoreId: run.defaultKeyValueStoreId,
+      defaultRequestQueueId: run.defaultRequestQueueId,
+      options: { timeoutSecs: run.timeoutSecs, memoryMbytes: run.memoryMbytes },
+      buildId: run.buildId,
+      buildNumber: run.buildNumber,
+      exitCode: run.exitCode,
+      stats: run.stats,
+    },
+  };
+  if (options.test) payload.test = true;
+  return payload;
+}
+
+/**
+ * Same private-URL guard the runner uses for production deliveries — kept
+ * inline because it's small and tied to the test endpoint's threat model.
+ * Blocks loopback, link-local / cloud metadata, and RFC 1918 ranges.
+ */
+function isPrivateUrl(urlString: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(urlString);
+  } catch {
+    return true;
+  }
+  const hostname = parsed.hostname;
+  if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1') return true;
+  if (hostname.startsWith('169.254.')) return true;
+  const parts = hostname.split('.').map(Number);
+  if (parts.length === 4 && parts.every((p) => !isNaN(p))) {
+    const [a, b] = parts as [number, number, number, number];
+    if (a === 10) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (parts.every((p) => p === 0)) return true;
+  }
+  return false;
+}
+
+/**
+ * One-shot synthetic delivery. Mirrors the runner's production payload
+ * shape so receivers don't need a different parser, but adds `test: true`
+ * and sentinel run IDs so the receiver can no-op side effects if it wants.
+ */
+async function deliverTestWebhook(
+  deliveryId: string,
+  webhook: WebhookRow,
+  eventType: string
+): Promise<DeliveryRow> {
+  const now = new Date();
+  const testRunId = `test-${deliveryId}`;
+
+  const baseInsert = await query<DeliveryRow>(
+    `INSERT INTO webhook_deliveries
+       (id, webhook_id, run_id, event_type, status, attempt_count, max_attempts, next_retry_at, created_at)
+     VALUES ($1, $2, NULL, $3, 'PENDING', 0, 1, NULL, NOW())
+     RETURNING *`,
+    [deliveryId, webhook.id, eventType]
+  );
+  const initial = baseInsert.rows[0]!;
+
+  if (isPrivateUrl(webhook.request_url)) {
+    const failed = await query<DeliveryRow>(
+      `UPDATE webhook_deliveries
+       SET status = 'FAILED', attempt_count = 1,
+           response_body = 'Webhook URL targets a private/internal network address',
+           finished_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [deliveryId]
+    );
+    return failed.rows[0] ?? initial;
+  }
+
+  // Derive `status` from the eventType so the synthetic run mirrors what
+  // production would produce for a real run reaching this state. Production
+  // event format is `ACTOR.RUN.${status}` (SUCCEEDED, FAILED, TIMED-OUT,
+  // ABORTED), so the last segment is the status. Falls back to SUCCEEDED
+  // for non-ACTOR.RUN events (future-proofing).
+  const statusFromEventType = eventType.split('.').pop() ?? 'SUCCEEDED';
+
+  // Synthetic run with realistic timing/IDs so receivers can exercise their
+  // full parsing path. `test-` prefixed IDs let receivers tell test runs
+  // apart from production at the data layer (in addition to `payload.test`).
+  const startedAt = new Date(now.getTime() - 5 * 60 * 1000); // 5 minutes ago
+  const finishedAt = ['RUNNING', 'READY'].includes(statusFromEventType) ? null : now;
+  const exitCode =
+    statusFromEventType === 'SUCCEEDED' ? 0 : statusFromEventType === 'RUNNING' ? null : 1;
+  const syntheticRun: WebhookRun = {
+    id: testRunId,
+    actorId: `test-${webhook.actor_id ?? 'actor'}`,
+    userId: webhook.user_id,
+    status: statusFromEventType,
+    startedAt: startedAt.toISOString(),
+    finishedAt: finishedAt ? finishedAt.toISOString() : null,
+    defaultDatasetId: `test-dataset-${deliveryId}`,
+    defaultKeyValueStoreId: `test-kv-${deliveryId}`,
+    defaultRequestQueueId: `test-rq-${deliveryId}`,
+    timeoutSecs: 3600,
+    memoryMbytes: 1024,
+    buildId: `test-build-${deliveryId}`,
+    buildNumber: '0.0.1',
+    exitCode,
+    stats: {
+      inputBodyLen: 0,
+      restartCount: 0,
+      resurrectCount: 0,
+      runTimeSecs: finishedAt ? Math.round((finishedAt.getTime() - startedAt.getTime()) / 1000) : 0,
+      computeUnits: 0,
+    },
+  };
+  const payload = buildWebhookPayload(eventType, syntheticRun, { test: true });
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(webhook.headers ?? {}),
+  };
+
+  let responseStatus: number | null = null;
+  let responseBody = '';
+  let ok = false;
+
+  try {
+    const response = await fetch(webhook.request_url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(10_000),
+    });
+    responseStatus = response.status;
+    responseBody = (await response.text().catch(() => '')).slice(0, 1024);
+    ok = response.ok;
+  } catch (err) {
+    responseBody = (err as Error).message.slice(0, 1024);
+  }
+
+  const finalStatus = ok ? 'DELIVERED' : 'FAILED';
+  const updated = await query<DeliveryRow>(
+    `UPDATE webhook_deliveries
+     SET status = $1, attempt_count = 1,
+         response_status = $2, response_body = $3,
+         finished_at = NOW()
+     WHERE id = $4
+     RETURNING *`,
+    [finalStatus, responseStatus, responseBody, deliveryId]
+  );
+  return updated.rows[0] ?? initial;
+}
 
 function formatWebhook(row: WebhookRow) {
   return {

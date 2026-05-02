@@ -15,6 +15,7 @@ const { Pool } = pg;
 interface RunJob {
   id: string;
   actor_id: string;
+  user_id: string;
   status: string;
   default_dataset_id: string;
   default_key_value_store_id: string;
@@ -24,6 +25,21 @@ interface RunJob {
   retry_count: number;
   origin_run_id: string | null;
   run_after: Date | null;
+  // Optional: present on rows fetched after a run has progressed.
+  // attemptWebhookDelivery uses these to build the Apify-compatible
+  // resource block — null means "not yet" (e.g. run still RUNNING).
+  started_at?: Date | null;
+  finished_at?: Date | null;
+  exit_code?: number | null;
+  build_id?: string | null;
+  build_number?: string | null;
+  stats_json?: {
+    inputBodyLen?: number;
+    restartCount?: number;
+    resurrectCount?: number;
+    runTimeSecs?: number;
+    computeUnits?: number;
+  } | null;
 }
 
 interface ActorRow {
@@ -243,17 +259,51 @@ async function processRun(run: RunJob): Promise<void> {
       status = 'FAILED';
     }
 
-    // Update run record
-    await pool.query(
+    // Update run record. Persist exit_code alongside status so receivers
+    // reading the webhook payload (resource.exitCode) and the runs API see
+    // the real exit value rather than null.
+    //
+    // The `WHERE status = 'RUNNING'` guard is the lifecycle invariant: if
+    // the actor SDK called Actor.fail() (PUT /v2/actor-runs/:id with
+    // status=FAILED) while the container was alive, the run is already in
+    // a terminal state and we MUST NOT overwrite it from the container's
+    // exit code. Common scenario: actor catches its own error, calls
+    // Actor.fail(), the SDK then cleans up and the process exits 0 — the
+    // pre-fix code would have flipped the run back to SUCCEEDED, hiding
+    // the failure on the dashboard, in webhooks, and in the runs API.
+    //
+    // RETURNING to detect the no-op case so we can log it (operator
+    // signal that some other path won the race — usually Actor.fail()).
+    const updateResult = await pool.query<{ status: string }>(
       `
-      UPDATE runs 
-      SET status = $1, finished_at = $2, modified_at = NOW()
-      WHERE id = $3
+      UPDATE runs
+      SET status = $1, finished_at = $2, exit_code = $3, modified_at = NOW()
+      WHERE id = $4 AND status = 'RUNNING'
+      RETURNING status
     `,
-      [status, result.finishedAt, runId]
+      [status, result.finishedAt, result.exitCode, runId]
     );
 
-    console.log(`Run ${runId} completed with status: ${status}`);
+    if (updateResult.rowCount === 0) {
+      // Status was already terminal — re-read what's there so the rest of
+      // the function (webhooks, retry) sees the authoritative status.
+      const cur = await pool.query<{ status: string }>('SELECT status FROM runs WHERE id = $1', [
+        runId,
+      ]);
+      const winning = cur.rows[0]?.status ?? status;
+      console.log(
+        `Run ${runId} container exited ${String(result.exitCode)} but run was already ${winning} (kept that). Likely Actor.fail() or abort.`
+      );
+      status = winning;
+    } else {
+      console.log(`Run ${runId} completed with status: ${status}`);
+    }
+
+    // Ingest Crawlee stats (SDK_CRAWLER_STATISTICS_0 from the run's KV
+    // store) so resource.stats in the webhook payload and the runs API
+    // carry real numbers instead of zero placeholders. Quiet no-op when
+    // the file isn't there (actor crashed before crawler.run()).
+    await ingestCrawlerStats(runId);
 
     // Trigger webhooks
     await triggerWebhooks(runId, status);
@@ -275,6 +325,51 @@ async function processRun(run: RunJob): Promise<void> {
 
     await triggerWebhooks(runId, 'FAILED');
     await maybeRetryRun(run, runId);
+  }
+}
+
+/**
+ * The runner's own URL for calling the API. config.apiBaseUrl is what we
+ * inject into actor *containers* (translated to host.docker.internal on
+ * macOS). For the runner process itself (running on the host), the
+ * `host.docker.internal` form doesn't resolve back — collapse it to
+ * `localhost`. Linux deploys typically have the API reachable at the same
+ * URL from runner and actor, so this is a no-op there.
+ */
+function selfApiBaseUrl(): string {
+  return config.apiBaseUrl.replace(/(^https?:\/\/)host\.docker\.internal(:|\/|$)/, '$1localhost$2');
+}
+
+/**
+ * After a run completes, fetch SDK_CRAWLER_STATISTICS_0 from the run's KV
+ * store via the API's ingest endpoint and stamp the parsed stats onto
+ * runs.stats_json. This is what makes webhook payload's resource.stats
+ * carry real Crawlee numbers (requestsFinished, requestsFailed, errors,
+ * crawlerRuntimeMillis) instead of zero placeholders.
+ *
+ * Best-effort: any failure is logged and swallowed — webhook delivery
+ * must not be blocked by stats ingestion. The endpoint itself returns 200
+ * with `stats: null` when the SDK file is absent (actor crashed before
+ * crawler.run()), which is the common case.
+ */
+async function ingestCrawlerStats(runId: string): Promise<void> {
+  if (!runnerApiKey) return;
+  try {
+    const url = `${selfApiBaseUrl()}/v2/actor-runs/${runId}/ingest-crawler-stats`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${runnerApiKey}`,
+      },
+      body: JSON.stringify({}),
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!response.ok) {
+      console.warn(`[stats] ingest endpoint returned HTTP ${String(response.status)} for ${runId}`);
+    }
+  } catch (err) {
+    console.warn(`[stats] ingest failed for ${runId}: ${(err as Error).message}`);
   }
 }
 
@@ -309,10 +404,17 @@ async function triggerWebhooks(runId: string, status: string): Promise<void> {
   for (const webhook of webhooks.rows) {
     const deliveryId = nanoid();
 
-    // Create delivery record
+    // Create delivery record. next_retry_at MUST be NULL on insert — we
+    // call attemptWebhookDelivery synchronously below for the first try.
+    // If we set next_retry_at = NOW() here, processWebhookRetries (running
+    // in parallel every 10s) sees this PENDING row as eligible for retry
+    // and fires a duplicate POST before our immediate attempt finishes the
+    // UPDATE. Net effect was 2-3 webhook.site receives per run, only one
+    // delivery row in the DB (UPDATEs raced and overwrote attempt_count).
+    // scheduleRetry sets next_retry_at forward only on actual failures.
     await pool.query(
       `INSERT INTO webhook_deliveries (id, webhook_id, run_id, event_type, status, attempt_count, max_attempts, next_retry_at)
-       VALUES ($1, $2, $3, $4, 'PENDING', 0, 5, NOW())`,
+       VALUES ($1, $2, $3, $4, 'PENDING', 0, 5, NULL)`,
       [deliveryId, webhook.id, runId, eventType]
     );
 
@@ -428,6 +530,11 @@ async function attemptWebhookDelivery(
   const RETRY_DELAYS = [10, 30, 60, 300, 900]; // seconds
 
   try {
+    // Default payload is the Apify-compatible shape with a full `resource`
+    // block. KEEP IN SYNC with packages/api/src/routes/webhooks.ts
+    // buildWebhookPayload — the test endpoint mirrors this shape so
+    // receivers tested with one path don't break in production. The
+    // webhook test snapshot in webhooks.test.ts locks the contract.
     const payload = webhook.payload_template
       ? JSON.parse(
           webhook.payload_template.replace(
@@ -442,9 +549,39 @@ async function attemptWebhookDelivery(
           )
         )
       : {
-          eventType,
-          eventData: { actorId: run.actor_id, actorRunId: run.id, status: run.status },
+          userId: run.user_id,
           createdAt: new Date().toISOString(),
+          eventType,
+          eventData: { actorId: run.actor_id, actorRunId: run.id },
+          resource: {
+            id: run.id,
+            actId: run.actor_id,
+            userId: run.user_id,
+            status: run.status,
+            startedAt: run.started_at?.toISOString() ?? null,
+            finishedAt: run.finished_at?.toISOString() ?? null,
+            defaultDatasetId: run.default_dataset_id,
+            defaultKeyValueStoreId: run.default_key_value_store_id,
+            defaultRequestQueueId: run.default_request_queue_id,
+            options: { timeoutSecs: run.timeout_secs, memoryMbytes: run.memory_mbytes },
+            buildId: run.build_id ?? null,
+            buildNumber: run.build_number ?? null,
+            exitCode: run.exit_code ?? null,
+            stats: {
+              inputBodyLen: run.stats_json?.inputBodyLen ?? 0,
+              restartCount: run.stats_json?.restartCount ?? 0,
+              resurrectCount: run.stats_json?.resurrectCount ?? 0,
+              runTimeSecs:
+                run.stats_json?.runTimeSecs ??
+                (run.finished_at && run.started_at
+                  ? Math.round(
+                      (new Date(run.finished_at).getTime() - new Date(run.started_at).getTime()) /
+                        1000
+                    )
+                  : 0),
+              computeUnits: run.stats_json?.computeUnits ?? 0,
+            },
+          },
         };
 
     const headers: Record<string, string> = {
