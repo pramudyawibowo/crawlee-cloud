@@ -1,15 +1,34 @@
 name: Publish CLI
 
+# Tag-driven publish. We use a synchronized-version flow across the
+# monorepo (root + api + cli + dashboard + runner all bump in lockstep
+# via a chore(release) PR), so the right trigger is the v* tag we push
+# AFTER that PR merges — not push-to-main, which the previous version
+# of this workflow used and which silently skipped every release commit
+# because the path filter excluded package.json edits.
+#
+# Trusted publishing: this workflow assumes the npm package
+# `@crawlee-cloud/cli` is configured for OIDC trusted publishing from
+# the `crawlee-cloud/crawlee-cloud` repo. No NPM_TOKEN secret needed —
+# `id-token: write` + `--provenance` is what npm verifies. If trusted
+# publishing isn't set up on the npm side, this job fails at the
+# publish step with a clear auth error.
+
 on:
   push:
-    branches:
-      - main
-    paths:
-      - 'packages/cli/**'
-      - '!packages/cli/package.json' # Avoid infinite loop from version bump
+    tags:
+      - 'v*'
+  # Manual fallback: maintainer can re-run the publish for a given tag
+  # without re-tagging (e.g. if trusted-publishing config changed).
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Tag or branch to publish from'
+        required: true
+        default: 'main'
 
 permissions:
-  contents: write
+  contents: read
   id-token: write
 
 jobs:
@@ -19,7 +38,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ github.event.inputs.ref || github.ref }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -27,38 +46,54 @@ jobs:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Install dependencies
+      # Install from the workspace root so the CLI gets its hoisted
+      # devDeps (tsc, etc.). `npm ci` inside packages/cli/ skips the
+      # workspace deduplication and can fail on missing types.
+      - name: Install workspace dependencies
         run: npm ci
-        working-directory: packages/cli
 
-      - name: Build
-        run: npm run build
-        working-directory: packages/cli
+      - name: Build CLI
+        run: npm run build --workspace=@crawlee-cloud/cli
 
-      - name: Bump version
-        id: version
+      - name: Verify the version we're about to publish matches the tag
+        env:
+          # On tag push, github.ref is `refs/tags/vX.Y.Z`. On
+          # workflow_dispatch, github.ref is the BRANCH the workflow
+          # was triggered from (typically `refs/heads/main`), NOT the
+          # user-supplied `inputs.ref` — so we must consult inputs.ref
+          # explicitly to decide which value to validate against. Without
+          # this, a maintainer running `workflow_dispatch` from main
+          # could publish whatever's in package.json with no guard.
+          TAG_REF: ${{ github.ref }}
+          DISPATCH_REF: ${{ github.event.inputs.ref }}
         run: |
-          cd packages/cli
-          # Get current version
-          CURRENT_VERSION=$(node -p "require('./package.json').version")
-          echo "Current version: $CURRENT_VERSION"
+          # Pick the canonical "expected version" from whichever event
+          # triggered us. tag push → strip refs/tags/v from $TAG_REF.
+          # workflow_dispatch → strip leading 'v' from $DISPATCH_REF
+          # and refuse to publish if it doesn't look like a version tag,
+          # because that's the only safe thing to do (publishing from
+          # `main` could ship an arbitrary version with no audit).
+          if [ -n "$DISPATCH_REF" ]; then
+            case "$DISPATCH_REF" in
+              v[0-9]*)
+                EXPECTED="${DISPATCH_REF#v}"
+                ;;
+              *)
+                echo "::error::workflow_dispatch ref must be a tag like v0.8.5 (got: $DISPATCH_REF). Refusing to publish from a branch — would skip the version-match guard."
+                exit 1
+                ;;
+            esac
+          else
+            EXPECTED="${TAG_REF#refs/tags/v}"
+          fi
 
-          # Bump patch version
-          npm version patch --no-git-tag-version
+          PKG=$(node -p "require('./packages/cli/package.json').version")
+          if [ "$EXPECTED" != "$PKG" ]; then
+            echo "::error::Expected version v$EXPECTED but packages/cli/package.json says $PKG. Bump all 5 workspace package.jsons before tagging."
+            exit 1
+          fi
+          echo "Publishing @crawlee-cloud/cli@$PKG"
 
-          # Get new version
-          NEW_VERSION=$(node -p "require('./package.json').version")
-          echo "New version: $NEW_VERSION"
-          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
-
-      - name: Commit version bump
-        run: |
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          git add packages/cli/package.json
-          git commit -m "chore(cli): bump version to ${{ steps.version.outputs.new_version }}" || echo "No changes to commit"
-          git push
-
-      - name: Publish to npm (trusted publishing)
+      - name: Publish to npm with provenance
         run: npm publish --provenance --access public
         working-directory: packages/cli
