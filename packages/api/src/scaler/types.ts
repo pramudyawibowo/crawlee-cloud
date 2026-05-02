@@ -7,6 +7,14 @@
 export interface RunnerInfo {
   /** Provider-specific ID (e.g. Droplet ID) */
   id: string;
+  /**
+   * Provider-specific name (e.g. Droplet name, container name). Used as a
+   * fallback when matching heartbeats: cloud-init can't always set
+   * RUNNER_ID to the provider id at boot, so the runner falls back to
+   * os.hostname() — which providers typically set to this name. The
+   * scaler tries id, ip, then name when looking up a runner's heartbeat.
+   */
+  name?: string;
   /** IP address for SSH access */
   ip: string;
   /**

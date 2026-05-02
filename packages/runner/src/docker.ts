@@ -8,9 +8,51 @@
  * - Collecting logs and exit codes
  */
 
+import os from 'node:os';
 import Docker from 'dockerode';
 import { Redis } from 'ioredis';
 import { config } from './config.js';
+
+let warnedAboutDarwinTranslate = false;
+
+/**
+ * Rewrite `localhost` / `127.0.0.1` hosts to `host.docker.internal` when the
+ * runner is on macOS. Reason: when the runner runs on the host (typical local
+ * dev) and spawns an actor container, `localhost` inside the actor resolves
+ * to the actor container itself, not the API on the host. Docker Desktop on
+ * macOS provides `host.docker.internal` for this exact case.
+ *
+ * Linux runners are *not* translated — `host.docker.internal` doesn't resolve
+ * by default there, and production Linux deploys typically use a reachable
+ * service hostname (compose service name, k8s service, etc.) rather than
+ * localhost. Touching the URL on Linux would break those setups.
+ *
+ * Exported for unit testing — `platform` is parameterised so tests don't have
+ * to monkey-patch `os.platform()`.
+ */
+export function translateLocalhostForContainer(
+  url: string,
+  platform: string = os.platform()
+): string {
+  if (platform !== 'darwin') return url;
+  try {
+    const u = new URL(url);
+    if (u.hostname === 'localhost' || u.hostname === '127.0.0.1') {
+      u.hostname = 'host.docker.internal';
+      if (!warnedAboutDarwinTranslate) {
+        console.warn(
+          `[Runner] Rewriting actor APIFY_API_BASE_URL host -> host.docker.internal ` +
+            `(macOS dev convenience). Set API_BASE_URL explicitly to silence this.`
+        );
+        warnedAboutDarwinTranslate = true;
+      }
+      return u.toString().replace(/\/$/, '');
+    }
+  } catch {
+    // If apiBaseUrl isn't a valid URL, leave it alone — caller will error.
+  }
+  return url;
+}
 
 export interface RunOptions {
   runId: string;
@@ -364,6 +406,7 @@ export function buildActorEnv(options: {
   } = options;
 
   const timeoutAt = new Date(Date.now() + timeoutSecs * 1000).toISOString();
+  const containerApiBaseUrl = translateLocalhostForContainer(apiBaseUrl);
 
   return {
     // Identity
@@ -371,10 +414,11 @@ export function buildActorEnv(options: {
     APIFY_ACTOR_RUN_ID: runId,
     APIFY_USER_ID: userId ?? 'anonymous',
 
-    // API connection
-    APIFY_API_BASE_URL: apiBaseUrl,
+    // API connection (rewritten on macOS so the actor container can reach back
+    // to the host-running API; see translateLocalhostForContainer).
+    APIFY_API_BASE_URL: containerApiBaseUrl,
     APIFY_TOKEN: token,
-    APIFY_API_PUBLIC_BASE_URL: apiBaseUrl,
+    APIFY_API_PUBLIC_BASE_URL: containerApiBaseUrl,
 
     // Storage IDs
     APIFY_DEFAULT_DATASET_ID: defaultDatasetId,

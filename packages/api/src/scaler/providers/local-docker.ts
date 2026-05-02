@@ -154,8 +154,12 @@ export class LocalDockerProvider implements RunnerProvider {
 
     return containers.map((c) => {
       const runnerId = c.Labels['crawlee-cloud.runner-id'] || c.Id;
+      // Docker prefixes names with '/', e.g. '/crawlee-runner-abc'. Strip it
+      // so the value matches what `os.hostname()` returns inside the container.
+      const containerName = (c.Names?.[0] || '').replace(/^\//, '') || undefined;
       return {
         id: runnerId,
+        name: containerName,
         ip: runnerId,
         status: c.State === 'running' ? 'ready' : 'draining',
         createdAt: new Date(c.Created * 1000),

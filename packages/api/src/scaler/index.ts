@@ -98,6 +98,16 @@ IMAGE_REGISTRY_USER=${process.env.IMAGE_REGISTRY_USER || ''}
 IMAGE_REGISTRY_TOKEN=${process.env.IMAGE_REGISTRY_TOKEN || ''}
 ${tlsEnvFileLine}
 ENVEOF
+
+# Pin RUNNER_ID to the DO droplet id (queried from the metadata service at
+# boot). The runner uses RUNNER_ID as its Redis heartbeat key; without this,
+# it falls back to os.hostname() (the droplet *name*), and the scaler — which
+# looks up heartbeats by droplet id — never matches it, so every runner is
+# marked dead and reaped. The api also matches by name as a fallback, so
+# this curl failing isn't fatal.
+DO_ID=$(curl -fsSL --max-time 5 http://169.254.169.254/metadata/v1/id 2>/dev/null || echo "")
+[ -n "$DO_ID" ] && echo "RUNNER_ID=$DO_ID" >> /etc/crawlee-runner.env
+
 chmod 600 /etc/crawlee-runner.env
 
 # Create systemd service
@@ -216,9 +226,19 @@ async function getActiveRunners(): Promise<RunnerInfo[]> {
     }
   }
 
-  // Match heartbeats to runners by ID or hostname
+  // Match heartbeats to runners by id, ip, or name. The name fallback
+  // exists because the runner publishes its heartbeat keyed on
+  // `os.hostname()` when RUNNER_ID isn't set in its environment, and
+  // some provisioning paths can't inject RUNNER_ID at boot. Providers
+  // typically set the OS hostname to the same string they return as
+  // `name` (DO droplet name; local-docker container name), so this
+  // catches the gap without requiring every cloud-init path to be
+  // perfect.
   for (const runner of runners) {
-    const hb = heartbeats.get(runner.id) || heartbeats.get(runner.ip);
+    const hb =
+      heartbeats.get(runner.id) ||
+      heartbeats.get(runner.ip) ||
+      (runner.name ? heartbeats.get(runner.name) : undefined);
     if (hb) {
       runner.activeRuns = hb.activeRuns;
       runner.status = hb.activeRuns > 0 ? 'busy' : 'ready';

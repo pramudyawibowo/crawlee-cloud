@@ -62,6 +62,7 @@ const { initScaler, stopScaler } = await import('../src/scaler/index.js');
 
 interface FakeRunner {
   id: string;
+  name?: string;
   ip: string;
   status: 'creating' | 'ready' | 'busy' | 'draining' | 'destroying';
   createdAt: Date;
@@ -262,6 +263,41 @@ describe('scaler loop', () => {
 
       await initScaler();
 
+      expect(noopDestroy).not.toHaveBeenCalled();
+    });
+
+    it('matches heartbeat by runner.name when id and ip do not match', async () => {
+      // Regression for: cloud-init couldn't always set RUNNER_ID, so the
+      // runner falls back to os.hostname() when publishing heartbeats. On
+      // DO that hostname is the droplet *name* (e.g. "crawlee-runner-177...")
+      // — different from the droplet *id* ("568518893") that listRunners
+      // returns. Without a name-keyed fallback, every healthy runner was
+      // marked dead and reaped after the threshold elapsed.
+      queryMock.mockResolvedValue({ rows: [] });
+      noopList.mockResolvedValue([
+        makeRunner('568518893', {
+          name: 'crawlee-runner-1777711194251',
+          ip: '161.35.56.254',
+          createdAt: new Date(Date.now() - 700_000), // > default 600s threshold
+        }),
+      ]);
+      // Heartbeat published under the hostname (= droplet name), not the id
+      redisScan.mockResolvedValue(scanResult(['runner:heartbeat:crawlee-runner-1777711194251']));
+      redisMget.mockResolvedValue([
+        JSON.stringify({
+          runnerId: 'crawlee-runner-1777711194251',
+          activeRuns: 0,
+          healthy: true,
+          cpuUsage: 0.1,
+          memoryUsageRatio: 0.3,
+        }),
+      ]);
+      redisGet.mockResolvedValue(String(Date.now() - 60_000));
+
+      await initScaler();
+
+      // Without the name fallback, this runner would be reaped despite the
+      // heartbeat being present in Redis under a key the scaler couldn't find.
       expect(noopDestroy).not.toHaveBeenCalled();
     });
 

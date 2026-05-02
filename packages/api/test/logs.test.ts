@@ -227,4 +227,47 @@ describe('Logs Routes', () => {
       expect(body.data.total).toBe(23_481);
     });
   });
+
+  describe('GET /actor-runs/:runId/log (Apify-compat alias)', () => {
+    // Apify's documented public endpoint is `/log` (singular), returning plain
+    // text. We expose `/logs/raw` as the canonical name and `/log` as the alias
+    // so apify-client and tooling targeting api.apify.com work unchanged when
+    // pointed at a self-hosted instance.
+
+    it('returns plain text and matches /logs/raw output line-for-line', async () => {
+      mockQuery.mockResolvedValue({ rows: [{ id: 'run-1' }] });
+      vi.mocked(redis.llen).mockResolvedValue(2);
+      vi.mocked(redis.lrange).mockResolvedValue([
+        JSON.stringify({ timestamp: '2026-05-02T10:00:00Z', level: 'INF', message: 'hello' }),
+        JSON.stringify({ timestamp: '2026-05-02T10:00:01Z', level: 'INF', message: 'world' }),
+      ]);
+
+      const aliasResponse = await app.inject({ method: 'GET', url: '/actor-runs/run-1/log' });
+      vi.mocked(redis.lrange).mockResolvedValue([
+        JSON.stringify({ timestamp: '2026-05-02T10:00:00Z', level: 'INF', message: 'hello' }),
+        JSON.stringify({ timestamp: '2026-05-02T10:00:01Z', level: 'INF', message: 'world' }),
+      ]);
+      const canonicalResponse = await app.inject({
+        method: 'GET',
+        url: '/actor-runs/run-1/logs/raw',
+      });
+
+      expect(aliasResponse.statusCode).toBe(200);
+      expect(canonicalResponse.statusCode).toBe(200);
+      expect(aliasResponse.headers['content-type']).toBe('text/plain; charset=utf-8');
+      expect(aliasResponse.body).toBe(canonicalResponse.body);
+      expect(aliasResponse.body).toContain('2026-05-02T10:00:00Z INF hello');
+    });
+
+    it('404s on a run the user does not own — same gate as the canonical route', async () => {
+      mockQuery.mockResolvedValue({ rows: [] }); // ownership check fails
+
+      const response = await app.inject({ method: 'GET', url: '/actor-runs/foreign/log' });
+
+      expect(response.statusCode).toBe(404);
+      expect(JSON.parse(response.body)).toMatchObject({
+        error: { type: 'record-not-found' },
+      });
+    });
+  });
 });

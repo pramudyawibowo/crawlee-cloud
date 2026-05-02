@@ -119,6 +119,7 @@ export class DigitalOceanProvider implements RunnerProvider {
       const publicNet = d.networks.v4.find((n) => n.type === 'public');
       return {
         id: String(d.id),
+        name: d.name,
         ip: publicNet?.ip_address || '',
         status: d.status === 'active' ? 'ready' : 'creating',
         createdAt: new Date(d.created_at),
