@@ -6,7 +6,9 @@ import type { FastifyPluginAsync } from 'fastify';
 import { nanoid } from 'nanoid';
 import { CreateWebhookSchema, UpdateWebhookSchema } from '../schemas/webhooks.js';
 import { query } from '../db/index.js';
+import { appendSearchCondition } from '../db/search.js';
 import { authenticate } from '../auth/middleware.js';
+import { applyWebhookTemplate } from '../webhooks/apply-template.js';
 
 interface WebhookRow {
   id: string;
@@ -82,20 +84,31 @@ export const webhooksRoutes: FastifyPluginAsync = async (fastify) => {
    * GET /v2/webhooks - List user's webhooks
    */
   fastify.get<{
-    Querystring: { offset?: string; limit?: string };
+    Querystring: { offset?: string; limit?: string; q?: string };
   }>('/webhooks', async (request) => {
     const offset = Math.max(0, parseInt(request.query.offset || '0', 10) || 0);
     const limit = Math.min(1000, Math.max(1, parseInt(request.query.limit || '100', 10) || 100));
 
+    // Webhooks have no `name` column — search instead matches against id,
+    // description, and request_url so operators can find a hook by what
+    // they typed in the description field or by domain.
+    const params: unknown[] = [request.user!.id];
+    const where = appendSearchCondition('user_id = $1', params, request.query.q || '', [
+      'id',
+      'description',
+      'request_url',
+    ]);
+
     const [countResult, pageResult] = await Promise.all([
-      query<{ total: string }>('SELECT COUNT(*)::text AS total FROM webhooks WHERE user_id = $1', [
-        request.user!.id,
-      ]),
+      query<{ total: string }>(
+        `SELECT COUNT(*)::text AS total FROM webhooks WHERE ${where}`,
+        params
+      ),
       query<WebhookRow>(
-        `SELECT * FROM webhooks WHERE user_id = $1
+        `SELECT * FROM webhooks WHERE ${where}
          ORDER BY created_at DESC, id DESC
-         LIMIT $2 OFFSET $3`,
-        [request.user!.id, limit, offset]
+         LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+        [...params, limit, offset]
       ),
     ]);
 
@@ -522,7 +535,15 @@ async function deliverTestWebhook(
       computeUnits: 0,
     },
   };
-  const payload = buildWebhookPayload(eventType, syntheticRun, { test: true });
+  // Apply the user's payload_template if set, so test webhooks exercise
+  // the same engine production deliveries do. Without this, an operator
+  // could test a webhook successfully and find their custom template
+  // mangling production payloads.
+  const defaultPayload = buildWebhookPayload(eventType, syntheticRun, { test: true });
+  const payload = applyWebhookTemplate(
+    webhook.payload_template,
+    defaultPayload as unknown as Record<string, unknown>
+  );
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...(webhook.headers ?? {}),

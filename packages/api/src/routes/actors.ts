@@ -6,6 +6,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import { nanoid } from 'nanoid';
 import { CreateActorSchema, UpdateActorSchema, ActorRunSchema } from '../schemas/actors.js';
 import { query } from '../db/index.js';
+import { appendSearchCondition } from '../db/search.js';
 import { redis } from '../storage/redis.js';
 import { authenticate } from '../auth/middleware.js';
 
@@ -162,23 +163,29 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
    * Mirrors the pattern in runs.ts and datasets.ts.
    */
   fastify.get<{
-    Querystring: { offset?: string; limit?: string };
+    Querystring: { offset?: string; limit?: string; q?: string };
   }>('/acts', async (request) => {
     const offset = Math.max(0, parseInt(request.query.offset || '0', 10) || 0);
     const limit = Math.min(1000, Math.max(1, parseInt(request.query.limit || '100', 10) || 100));
+
+    const params: unknown[] = [request.user!.id];
+    const where = appendSearchCondition('user_id = $1', params, request.query.q || '', [
+      'id',
+      'name',
+      'title',
+      'description',
+    ]);
 
     // COUNT and SELECT run in parallel. Stable tiebreaker on `id` so
     // LIMIT/OFFSET paging doesn't drop or duplicate rows when two actors
     // share the same created_at (ms-precision ties happen on bulk imports).
     const [countResult, pageResult] = await Promise.all([
-      query<{ total: string }>('SELECT COUNT(*)::text AS total FROM actors WHERE user_id = $1', [
-        request.user!.id,
-      ]),
+      query<{ total: string }>(`SELECT COUNT(*)::text AS total FROM actors WHERE ${where}`, params),
       query<ActorRow>(
-        `SELECT * FROM actors WHERE user_id = $1
+        `SELECT * FROM actors WHERE ${where}
          ORDER BY created_at DESC, id DESC
-         LIMIT $2 OFFSET $3`,
-        [request.user!.id, limit, offset]
+         LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+        [...params, limit, offset]
       ),
     ]);
 
