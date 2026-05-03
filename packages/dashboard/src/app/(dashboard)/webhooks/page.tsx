@@ -15,6 +15,7 @@ import {
   Webhook as WebhookIcon,
 } from 'lucide-react';
 import { AppLink } from '@/components/app-link';
+import { Pagination } from '@/components/pagination';
 import {
   createWebhook,
   deleteWebhook,
@@ -27,6 +28,8 @@ import {
   type Webhook,
   type WebhookDelivery,
 } from '@/lib/api';
+import { FETCH_ALL_LIMIT, PAGE_SIZE } from '@/lib/constants';
+import { usePageParam } from '@/lib/use-page-param';
 import { WEBHOOK_EVENTS } from '@/lib/webhooks';
 import { cn } from '@/lib/utils';
 import { useConfirm } from '@/components/ui/confirm';
@@ -35,7 +38,9 @@ import { useToast } from '@/components/ui/toast';
 export default function WebhooksPage() {
   const confirm = useConfirm();
   const toast = useToast();
+  const { offset, setOffset } = usePageParam();
   const [webhooks, setWebhooks] = useState<Webhook[]>([]);
+  const [total, setTotal] = useState(0);
   const [actors, setActors] = useState<Actor[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
@@ -54,18 +59,22 @@ export default function WebhooksPage() {
 
   useEffect(() => {
     let alive = true;
-    void Promise.all([getWebhooks().catch(() => []), getActors().catch(() => [])]).then(
-      ([w, a]) => {
-        if (!alive) return;
-        setWebhooks(w);
-        setActors(a);
-        setLoading(false);
+    void Promise.all([
+      getWebhooks({ offset, limit: PAGE_SIZE }).catch(() => null),
+      getActors({ limit: FETCH_ALL_LIMIT }).catch(() => null),
+    ]).then(([w, a]) => {
+      if (!alive) return;
+      if (w) {
+        setWebhooks(w.items);
+        setTotal(w.total);
       }
-    );
+      if (a) setActors(a.items);
+      setLoading(false);
+    });
     return () => {
       alive = false;
     };
-  }, []);
+  }, [offset]);
 
   function handleSaved(w: Webhook) {
     if (editingId) {
@@ -372,6 +381,8 @@ export default function WebhooksPage() {
           })}
         </ul>
       )}
+
+      <Pagination total={total} offset={offset} limit={PAGE_SIZE} onChange={setOffset} />
     </div>
   );
 }

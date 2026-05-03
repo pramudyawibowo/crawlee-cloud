@@ -3,28 +3,37 @@
 import { Suspense, useEffect, useState } from 'react';
 import { Database, Download, Eye, Search, Trash2 } from 'lucide-react';
 import { AppLink } from '@/components/app-link';
+import { Pagination } from '@/components/pagination';
 import { useConfirm } from '@/components/ui/confirm';
 import { useToast } from '@/components/ui/toast';
 import type { Dataset } from '@/lib/api';
 import { deleteDataset, getDatasetItems, getDatasets } from '@/lib/api';
+import { PAGE_SIZE } from '@/lib/constants';
+import { usePageParam } from '@/lib/use-page-param';
 
 function DatasetsContent() {
   const confirm = useConfirm();
   const toast = useToast();
+  const { offset, setOffset } = usePageParam();
   const [datasets, setDatasets] = useState<Dataset[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
 
   useEffect(() => {
     let alive = true;
-    getDatasets()
-      .then((d) => alive && setDatasets(d))
+    getDatasets({ offset, limit: PAGE_SIZE })
+      .then((p) => {
+        if (!alive) return;
+        setDatasets(p.items);
+        setTotal(p.total);
+      })
       .catch(() => {})
       .finally(() => alive && setLoading(false));
     return () => {
       alive = false;
     };
-  }, []);
+  }, [offset]);
 
   async function handleDelete(id: string) {
     const ok = await confirm({
@@ -173,6 +182,8 @@ function DatasetsContent() {
           </table>
         )}
       </section>
+
+      <Pagination total={total} offset={offset} limit={PAGE_SIZE} onChange={setOffset} />
     </div>
   );
 }

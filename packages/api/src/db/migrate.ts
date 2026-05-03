@@ -291,6 +291,59 @@ ALTER TABLE actors ADD COLUMN IF NOT EXISTS retry_delay_secs INTEGER DEFAULT 60;
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS retry_count INTEGER DEFAULT 0;
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS origin_run_id VARCHAR(21);
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS run_after TIMESTAMPTZ;
+
+-- Retention slice #3: tombstone audit log for reaped resources.
+-- BIGSERIAL diverges from the project-wide VARCHAR(21) nanoid convention
+-- because tombstones are operator-internal — never user-referenced, never
+-- URL-shared, benefit from monotonic insertion order for time-window queries.
+-- user_id has no FK by design: tombstones must outlive users (audit trail).
+CREATE TABLE IF NOT EXISTS retention_tombstones (
+  id BIGSERIAL PRIMARY KEY,
+  resource_kind TEXT NOT NULL CHECK (resource_kind IN
+    ('dataset', 'key_value_store', 'request_queue', 'run')),
+  resource_id VARCHAR(21) NOT NULL,
+  resource_name TEXT,
+  user_id VARCHAR(21),
+  reason TEXT NOT NULL CHECK (reason IN ('expired-unnamed', 'expired-run')),
+  original_created_at TIMESTAMPTZ,
+  metadata JSONB,
+  deleted_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_tombstones_deleted_at
+  ON retention_tombstones(deleted_at DESC);
+
+-- Retention slice #3: storage referenced by a run becomes NULL when storage
+-- is reaped, instead of failing the DELETE. Lets the reaper run runs and
+-- storage in either order without coordination.
+--
+-- Three explicit DROP+ADD migrations because PG auto-named constraints don't
+-- support ALTER MODIFY in place. Constraint names follow PG's default
+-- pattern: {table}_{column}_fkey.
+ALTER TABLE runs DROP CONSTRAINT IF EXISTS runs_default_dataset_id_fkey;
+ALTER TABLE runs ADD CONSTRAINT runs_default_dataset_id_fkey
+  FOREIGN KEY (default_dataset_id) REFERENCES datasets(id) ON DELETE SET NULL;
+
+ALTER TABLE runs DROP CONSTRAINT IF EXISTS runs_default_key_value_store_id_fkey;
+ALTER TABLE runs ADD CONSTRAINT runs_default_key_value_store_id_fkey
+  FOREIGN KEY (default_key_value_store_id) REFERENCES key_value_stores(id) ON DELETE SET NULL;
+
+ALTER TABLE runs DROP CONSTRAINT IF EXISTS runs_default_request_queue_id_fkey;
+ALTER TABLE runs ADD CONSTRAINT runs_default_request_queue_id_fkey
+  FOREIGN KEY (default_request_queue_id) REFERENCES request_queues(id) ON DELETE SET NULL;
+
+-- Retention slice #3: partial indexes matching the reaper's eligibility
+-- predicate, so the sweep query is O(eligible) regardless of total table
+-- size. Each storage index covers (accessed_at) over rows where name IS NULL;
+-- runs covers (finished_at) over rows where finished_at IS NOT NULL.
+CREATE INDEX IF NOT EXISTS idx_datasets_unnamed_accessed
+  ON datasets(accessed_at) WHERE name IS NULL;
+CREATE INDEX IF NOT EXISTS idx_kv_stores_unnamed_accessed
+  ON key_value_stores(accessed_at) WHERE name IS NULL;
+CREATE INDEX IF NOT EXISTS idx_request_queues_unnamed_accessed
+  ON request_queues(accessed_at) WHERE name IS NULL;
+CREATE INDEX IF NOT EXISTS idx_runs_finished
+  ON runs(finished_at) WHERE finished_at IS NOT NULL;
 `;
 
 export async function migrate(): Promise<void> {

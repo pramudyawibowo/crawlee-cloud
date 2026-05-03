@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { CalendarClock, Clock, Loader2, Plus, Save, Trash2 } from 'lucide-react';
 import { AppLink } from '@/components/app-link';
+import { Pagination } from '@/components/pagination';
 import { useConfirm } from '@/components/ui/confirm';
 import { useToast } from '@/components/ui/toast';
 import {
@@ -14,6 +15,8 @@ import {
   type Actor,
   type Schedule,
 } from '@/lib/api';
+import { FETCH_ALL_LIMIT, PAGE_SIZE } from '@/lib/constants';
+import { usePageParam } from '@/lib/use-page-param';
 import { cn } from '@/lib/utils';
 
 const COMMON_CRONS: { label: string; value: string; hint: string }[] = [
@@ -28,25 +31,31 @@ const COMMON_CRONS: { label: string; value: string; hint: string }[] = [
 export default function SchedulesPage() {
   const confirm = useConfirm();
   const toast = useToast();
+  const { offset, setOffset } = usePageParam();
   const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const [total, setTotal] = useState(0);
   const [actors, setActors] = useState<Actor[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
 
   useEffect(() => {
     let alive = true;
-    void Promise.all([getSchedules().catch(() => []), getActors().catch(() => [])]).then(
-      ([s, a]) => {
-        if (!alive) return;
-        setSchedules(s);
-        setActors(a);
-        setLoading(false);
+    void Promise.all([
+      getSchedules({ offset, limit: PAGE_SIZE }).catch(() => null),
+      getActors({ limit: FETCH_ALL_LIMIT }).catch(() => null),
+    ]).then(([s, a]) => {
+      if (!alive) return;
+      if (s) {
+        setSchedules(s.items);
+        setTotal(s.total);
       }
-    );
+      if (a) setActors(a.items);
+      setLoading(false);
+    });
     return () => {
       alive = false;
     };
-  }, []);
+  }, [offset]);
 
   async function handleToggle(s: Schedule) {
     try {
@@ -199,6 +208,8 @@ export default function SchedulesPage() {
           })}
         </ul>
       )}
+
+      <Pagination total={total} offset={offset} limit={PAGE_SIZE} onChange={setOffset} />
     </div>
   );
 }

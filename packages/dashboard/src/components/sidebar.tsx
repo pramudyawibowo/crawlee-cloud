@@ -18,7 +18,9 @@ import {
   Boxes,
   ListOrdered,
   Cpu,
+  Trash2,
 } from 'lucide-react';
+import { APP_VERSION } from '@/lib/constants';
 import { cn } from '@/lib/utils';
 import type { LucideIcon } from 'lucide-react';
 
@@ -71,6 +73,7 @@ export const navGroups: Group[] = [
     label: 'System',
     items: [
       { href: '/runners', label: 'Runners', icon: Cpu },
+      { href: '/retention', label: 'Retention', icon: Trash2 },
       { href: '/settings', label: 'Settings', icon: Settings },
       { href: '/docs', label: 'Docs', icon: BookOpen },
     ],
@@ -105,7 +108,7 @@ export function BrandStrip() {
           CRAWLEE CLOUD
         </span>
         <span className="font-mono text-[9px] tracking-[0.22em] text-muted-foreground">
-          OPERATOR · v0.1
+          OPERATOR · v{APP_VERSION}
         </span>
       </div>
     </div>

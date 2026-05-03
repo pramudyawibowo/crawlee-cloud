@@ -3,27 +3,36 @@
 import { useEffect, useState } from 'react';
 import { ListOrdered, Search, Trash2 } from 'lucide-react';
 import { AppLink } from '@/components/app-link';
+import { Pagination } from '@/components/pagination';
 import { useConfirm } from '@/components/ui/confirm';
 import { useToast } from '@/components/ui/toast';
 import { deleteRequestQueue, getRequestQueues, type RequestQueue } from '@/lib/api';
+import { PAGE_SIZE } from '@/lib/constants';
+import { usePageParam } from '@/lib/use-page-param';
 
 export default function RequestQueuesPage() {
   const confirm = useConfirm();
   const toast = useToast();
+  const { offset, setOffset } = usePageParam();
   const [queues, setQueues] = useState<RequestQueue[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
 
   useEffect(() => {
     let alive = true;
-    getRequestQueues()
-      .then((d) => alive && setQueues(d))
+    getRequestQueues({ offset, limit: PAGE_SIZE })
+      .then((p) => {
+        if (!alive) return;
+        setQueues(p.items);
+        setTotal(p.total);
+      })
       .catch(() => {})
       .finally(() => alive && setLoading(false));
     return () => {
       alive = false;
     };
-  }, []);
+  }, [offset]);
 
   async function handleDelete(q: RequestQueue) {
     const ok = await confirm({
@@ -157,6 +166,8 @@ export default function RequestQueuesPage() {
           </table>
         )}
       </section>
+
+      <Pagination total={total} offset={offset} limit={PAGE_SIZE} onChange={setOffset} />
     </div>
   );
 }

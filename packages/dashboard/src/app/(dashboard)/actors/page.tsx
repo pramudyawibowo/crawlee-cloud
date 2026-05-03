@@ -3,24 +3,33 @@
 import { useEffect, useState } from 'react';
 import { Plus, Search, Drama } from 'lucide-react';
 import { AppLink } from '@/components/app-link';
+import { Pagination } from '@/components/pagination';
 import type { Actor } from '@/lib/api';
 import { getActors } from '@/lib/api';
+import { PAGE_SIZE } from '@/lib/constants';
+import { usePageParam } from '@/lib/use-page-param';
 
 export default function ActorsPage() {
+  const { offset, setOffset } = usePageParam();
   const [actors, setActors] = useState<Actor[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
 
   useEffect(() => {
     let alive = true;
-    getActors()
-      .then((d) => alive && setActors(d))
+    getActors({ offset, limit: PAGE_SIZE })
+      .then((p) => {
+        if (!alive) return;
+        setActors(p.items);
+        setTotal(p.total);
+      })
       .catch(() => {})
       .finally(() => alive && setLoading(false));
     return () => {
       alive = false;
     };
-  }, []);
+  }, [offset]);
 
   const q = search.trim().toLowerCase();
   const filtered = q
@@ -122,6 +131,8 @@ export default function ActorsPage() {
           ))}
         </ul>
       )}
+
+      <Pagination total={total} offset={offset} limit={PAGE_SIZE} onChange={setOffset} />
     </div>
   );
 }

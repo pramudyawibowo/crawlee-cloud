@@ -8,6 +8,7 @@ import { prefixPath } from '@/lib/path-prefix';
 import { useToast } from '@/components/ui/toast';
 import type { Actor } from '@/lib/api';
 import { getActors, startRun } from '@/lib/api';
+import { FETCH_ALL_LIMIT } from '@/lib/constants';
 
 function NewRunContent() {
   const router = useRouter();
@@ -22,11 +23,11 @@ function NewRunContent() {
 
   useEffect(() => {
     let alive = true;
-    getActors()
-      .then((data) => {
+    getActors({ limit: FETCH_ALL_LIMIT })
+      .then((p) => {
         if (!alive) return;
-        setActors(data);
-        if (preselected && data.find((a) => a.id === preselected)) {
+        setActors(p.items);
+        if (preselected && p.items.find((a) => a.id === preselected)) {
           setSelectedActor(preselected);
         }
       })

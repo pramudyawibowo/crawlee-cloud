@@ -6,6 +6,37 @@
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
 
+/**
+ * Apify-shaped pagination envelope. The API's list endpoints return this
+ * shape under `data`. `total` is the real row count from a parallel
+ * COUNT(*) query (not the page length); `count` is the page length.
+ *
+ * Use {@link Pagination} from @/components/pagination for prev/next UI.
+ */
+export interface Page<T> {
+  items: T[];
+  total: number;
+  count: number;
+  offset: number;
+  limit: number;
+}
+
+/** Common params shape for list endpoints. */
+export interface PageParams {
+  offset?: number;
+  limit?: number;
+}
+
+/** Build a `?offset=N&limit=N` querystring (omitting unset values). */
+function pageQuery(params?: PageParams): string {
+  if (!params) return '';
+  const qs = new URLSearchParams();
+  if (params.offset !== undefined) qs.set('offset', String(params.offset));
+  if (params.limit !== undefined) qs.set('limit', String(params.limit));
+  const s = qs.toString();
+  return s ? `?${s}` : '';
+}
+
 export interface Run {
   id: string;
   actId: string;
@@ -153,6 +184,24 @@ export interface ScalerStatus {
   heartbeats: Record<string, unknown>[];
   queue: { ready: number; running: number; total: number };
   config: { min: number; max: number; runsPerRunner: number };
+}
+
+/**
+ * Wire shape returned by GET /v2/system/retention/status (admin-only).
+ * `lastTickAt` / `lastTickElapsedMs` are null when the reaper has never
+ * ticked since the Redis hash was last written or wiped.
+ */
+export interface RetentionStatus {
+  enabled: boolean;
+  lastTickAt: string | null;
+  lastTickElapsedMs: number | null;
+  reapedLast24h: {
+    dataset: number;
+    key_value_store: number;
+    request_queue: number;
+    run: number;
+  };
+  tombstoneRowCount: number;
 }
 
 /**
@@ -550,9 +599,9 @@ export async function getActorRuns(actorId: string): Promise<Run[]> {
 }
 
 // Actors
-export async function getActors(): Promise<Actor[]> {
-  const res = await fetchApi<{ data: { items: Actor[] } }>('/v2/acts');
-  return res.data.items;
+export async function getActors(params?: PageParams): Promise<Page<Actor>> {
+  const res = await fetchApi<{ data: Page<Actor> }>(`/v2/acts${pageQuery(params)}`);
+  return res.data;
 }
 
 export async function getActor(id: string): Promise<Actor> {
@@ -577,9 +626,9 @@ export async function deleteActor(id: string): Promise<void> {
 }
 
 // Datasets
-export async function getDatasets(): Promise<Dataset[]> {
-  const res = await fetchApi<{ data: { items: Dataset[] } }>('/v2/datasets');
-  return res.data.items;
+export async function getDatasets(params?: PageParams): Promise<Page<Dataset>> {
+  const res = await fetchApi<{ data: Page<Dataset> }>(`/v2/datasets${pageQuery(params)}`);
+  return res.data;
 }
 
 export async function getDataset(id: string): Promise<Dataset> {
@@ -687,10 +736,15 @@ export async function getDashboardStats(): Promise<{
   failedLast24h: number;
 }> {
   try {
+    // Stat counts come from the page envelope's `total` (real COUNT(*) on
+    // the API side) rather than `items.length`. We pass `limit: 1` because
+    // the items themselves are unused — only the total matters for the
+    // counter tiles on the home dashboard.
+    const emptyPage = <T>(): Page<T> => ({ items: [], total: 0, count: 0, offset: 0, limit: 0 });
     const [runs, actors, datasets] = await Promise.all([
-      getRuns().catch(() => []),
-      getActors().catch(() => []),
-      getDatasets().catch(() => []),
+      getRuns().catch(() => [] as Run[]),
+      getActors({ limit: 1 }).catch(() => emptyPage<Actor>()),
+      getDatasets({ limit: 1 }).catch(() => emptyPage<Dataset>()),
     ]);
 
     const succeeded = runs.filter((r) => r.status === 'SUCCEEDED').length;
@@ -704,8 +758,8 @@ export async function getDashboardStats(): Promise<{
 
     return {
       totalRuns: runs.length,
-      activeActors: actors.length,
-      totalDatasets: datasets.length,
+      activeActors: actors.total,
+      totalDatasets: datasets.total,
       successRate: Math.round(successRate),
       runningCount,
       failedLast24h,
@@ -791,9 +845,9 @@ export async function getVersions(actorId: string): Promise<ActorVersion[]> {
 // Webhooks
 // ---------------------------------------------------------------------------
 
-export async function getWebhooks(): Promise<Webhook[]> {
-  const res = await fetchApi<{ data: { items: Webhook[] } }>('/v2/webhooks');
-  return res.data.items;
+export async function getWebhooks(params?: PageParams): Promise<Page<Webhook>> {
+  const res = await fetchApi<{ data: Page<Webhook> }>(`/v2/webhooks${pageQuery(params)}`);
+  return res.data;
 }
 
 export async function getWebhook(id: string): Promise<Webhook> {
@@ -844,9 +898,9 @@ export async function deleteWebhook(id: string): Promise<void> {
 // Schedules — cron-driven actor runs
 // ---------------------------------------------------------------------------
 
-export async function getSchedules(): Promise<Schedule[]> {
-  const res = await fetchApi<{ data: { items: Schedule[] } }>('/v2/schedules');
-  return res.data.items;
+export async function getSchedules(params?: PageParams): Promise<Page<Schedule>> {
+  const res = await fetchApi<{ data: Page<Schedule> }>(`/v2/schedules${pageQuery(params)}`);
+  return res.data;
 }
 
 export async function createSchedule(body: {
@@ -889,9 +943,11 @@ export async function deleteSchedule(id: string): Promise<void> {
 // Key-Value Stores
 // ---------------------------------------------------------------------------
 
-export async function getKeyValueStores(): Promise<KeyValueStore[]> {
-  const res = await fetchApi<{ data: { items: KeyValueStore[] } }>('/v2/key-value-stores');
-  return res.data.items;
+export async function getKeyValueStores(params?: PageParams): Promise<Page<KeyValueStore>> {
+  const res = await fetchApi<{ data: Page<KeyValueStore> }>(
+    `/v2/key-value-stores${pageQuery(params)}`
+  );
+  return res.data;
 }
 
 export async function getKeyValueStore(id: string): Promise<KeyValueStore> {
@@ -925,9 +981,11 @@ export async function getKVKeys(
 // Request Queues
 // ---------------------------------------------------------------------------
 
-export async function getRequestQueues(): Promise<RequestQueue[]> {
-  const res = await fetchApi<{ data: { items: RequestQueue[] } }>('/v2/request-queues');
-  return res.data.items;
+export async function getRequestQueues(params?: PageParams): Promise<Page<RequestQueue>> {
+  const res = await fetchApi<{ data: Page<RequestQueue> }>(
+    `/v2/request-queues${pageQuery(params)}`
+  );
+  return res.data;
 }
 
 export async function getRequestQueue(id: string): Promise<RequestQueue> {
@@ -970,6 +1028,11 @@ export async function findProducingRun(
 
 export async function getScalerStatus(): Promise<ScalerStatus> {
   const res = await fetchApi<{ data: ScalerStatus }>('/v2/scaler/status');
+  return res.data;
+}
+
+export async function getRetentionStatus(): Promise<RetentionStatus> {
+  const res = await fetchApi<{ data: RetentionStatus }>('/v2/system/retention/status');
   return res.data;
 }
 

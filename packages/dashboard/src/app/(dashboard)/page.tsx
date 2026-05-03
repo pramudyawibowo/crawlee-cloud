@@ -6,6 +6,7 @@ import { AppLink } from '@/components/app-link';
 import { StatusChip } from '@/components/ui/badge';
 import type { Actor, Run } from '@/lib/api';
 import { getActors, getDashboardStats, getRuns } from '@/lib/api';
+import { FETCH_ALL_LIMIT } from '@/lib/constants';
 import { cn } from '@/lib/utils';
 
 type Stats = Awaited<ReturnType<typeof getDashboardStats>>;
@@ -31,13 +32,13 @@ export default function ConsolePage() {
         const [s, r, a] = await Promise.all([
           getDashboardStats(),
           getRuns(),
-          getActors().catch(() => [] as Actor[]),
+          getActors({ limit: FETCH_ALL_LIMIT }).catch(() => null),
         ]);
         if (!alive) return;
         setStats(s);
         setRuns(r);
         const map: Record<string, Actor> = {};
-        a.forEach((x) => (map[x.id] = x));
+        if (a) a.items.forEach((x) => (map[x.id] = x));
         setActorsById(map);
       } finally {
         if (alive) setLoading(false);

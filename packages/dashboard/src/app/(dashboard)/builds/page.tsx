@@ -5,6 +5,7 @@ import { GitBranch, GitCommit, Hammer, RotateCw } from 'lucide-react';
 import { AppLink } from '@/components/app-link';
 import { StatusChip } from '@/components/ui/badge';
 import { getActors, getBuilds, type Actor, type ActorBuild } from '@/lib/api';
+import { FETCH_ALL_LIMIT } from '@/lib/constants';
 import { cn } from '@/lib/utils';
 
 /*
@@ -24,7 +25,8 @@ export default function BuildsPage() {
   async function load() {
     setRefreshing(true);
     try {
-      const acts = await getActors().catch(() => [] as Actor[]);
+      const page = await getActors({ limit: FETCH_ALL_LIMIT }).catch(() => null);
+      const acts = page?.items ?? [];
       setActors(acts);
       // Fan-out: pull builds for every actor in parallel; tolerate per-actor failure.
       const perActor = await Promise.all(
