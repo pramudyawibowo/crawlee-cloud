@@ -31,7 +31,12 @@ export async function initS3(): Promise<void> {
 }
 
 /**
- * Store a dataset item.
+ * Store a single dataset item.
+ *
+ * Retained for backwards compatibility with any existing caller; the dataset
+ * push route now uses putDatasetBatch (one S3 object per pushData call) for
+ * cost on Spaces and IOPS on hobby MinIO. Reads transparently handle both
+ * formats — see iterateDatasetItems.
  */
 export async function putDatasetItem(
   datasetId: string,
@@ -51,43 +56,125 @@ export async function putDatasetItem(
 }
 
 /**
- * Get dataset items with pagination.
+ * Store a batch of dataset items as a single S3 object.
+ *
+ * Key shape: `datasets/{id}/{startIdx-9d}.batch.json`. The 9-digit padding on
+ * startIdx preserves lexicographic = numeric ordering relative to the legacy
+ * `{idx-9d}.json` key shape, so a single ListObjectsV2 returns old + new keys
+ * interleaved in correct numeric order. The `.batch.json` infix is the
+ * positive marker iterateDatasetItems dispatches on.
+ */
+export async function putDatasetBatch(
+  datasetId: string,
+  startIdx: number,
+  items: unknown[]
+): Promise<void> {
+  if (items.length === 0) return;
+  const key = `datasets/${datasetId}/${String(startIdx).padStart(9, '0')}.batch.json`;
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: config.s3Bucket,
+      Key: key,
+      Body: JSON.stringify(items),
+      ContentType: 'application/json',
+    })
+  );
+}
+
+/**
+ * Get dataset items with pagination — skips whole batch objects by
+ * filename without fetching their bodies.
+ *
+ * Strategy: list every key once (paginated ListObjectsV2 walk; cheap),
+ * derive each key's [start, length) range from the filename, filter to
+ * ranges overlapping the requested [offset, offset + limit) window,
+ * then GET only those keys in parallel.
+ *
+ * For batched keys (`{startIdx-9d}.batch.json`), length is inferred as
+ * the next key's startIdx minus this one's. For the last key, length
+ * comes from caller-supplied `total` (datasets.item_count) or defaults
+ * to 1. For legacy single-item keys (`{idx-9d}.json`), length is 1.
+ *
+ * Cost: O(total / 1000) LIST + O(ceil(limit / batch_size) + 1) GET.
+ * The previous read-from-zero implementation was O(offset / batch_size)
+ * GETs at deep offsets — this one is bounded by `limit` regardless of
+ * how deep the offset goes.
+ *
+ * `total`: caller should pass `datasets.item_count` (authoritative).
+ * When omitted, falls back to the last key's inferred range.
  */
 export async function listDatasetItems(
   datasetId: string,
-  options: { offset?: number; limit?: number } = {}
+  options: { offset?: number; limit?: number; total?: number } = {}
 ): Promise<{ items: unknown[]; total: number }> {
-  const { offset = 0, limit = 100 } = options;
-  const prefix = `datasets/${datasetId}/`;
+  const { offset = 0, limit = 100, total: totalHint } = options;
+  const wantStart = offset;
+  const wantEnd = offset + limit;
 
-  // List all objects to get total count
-  const listResult = await s3.send(
-    new ListObjectsV2Command({
-      Bucket: config.s3Bucket,
-      Prefix: prefix,
+  // Phase 1: collect keys + their inferred ranges. No body fetches.
+  const keys: string[] = [];
+  for await (const key of iterateDatasetKeys(datasetId)) {
+    keys.push(key);
+  }
+  if (keys.length === 0) return { items: [], total: totalHint ?? 0 };
+
+  const startOf = (key: string): number => {
+    const m = /(\d{9})/.exec(key);
+    return m ? parseInt(m[1]!, 10) : 0;
+  };
+
+  type Range = { key: string; start: number; length: number; isBatch: boolean };
+  const ranges: Range[] = [];
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i]!;
+    const start = startOf(key);
+    const isBatch = key.endsWith('.batch.json');
+    let length: number;
+    if (!isBatch) {
+      length = 1;
+    } else if (i + 1 < keys.length) {
+      length = startOf(keys[i + 1]!) - start;
+    } else {
+      // Last batch — derive length from caller-supplied total when known,
+      // otherwise default to 1 (under-counts the tail; callers that need
+      // exact pagination across the last batch should pass `total`).
+      length = totalHint !== undefined ? Math.max(1, totalHint - start) : 1;
+    }
+    if (length > 0) ranges.push({ key, start, length, isBatch });
+  }
+
+  // Phase 2: filter to ranges overlapping [wantStart, wantEnd).
+  const overlapping = ranges.filter((r) => r.start < wantEnd && r.start + r.length > wantStart);
+
+  // Phase 3: parallel-fetch only the overlapping keys.
+  const fetched = await Promise.all(
+    overlapping.map(async (r) => {
+      const body = await getDatasetItemByKey(r.key);
+      const arr = r.isBatch ? (Array.isArray(body) ? body : []) : [body];
+      return { range: r, items: arr };
     })
   );
 
-  const allKeys = listResult.Contents?.map((obj) => obj.Key!) || [];
-  const total = allKeys.length;
+  // Phase 4: place items at their absolute positions, then slice. Using a
+  // Map keeps the result dense even if a batch turns out shorter than its
+  // inferred length (e.g. an unfinished tail).
+  const placed = new Map<number, unknown>();
+  for (const { range, items: chunkItems } of fetched) {
+    for (let i = 0; i < chunkItems.length; i++) {
+      const absIdx = range.start + i;
+      if (absIdx >= wantStart && absIdx < wantEnd) {
+        placed.set(absIdx, chunkItems[i]);
+      }
+    }
+  }
+  const items: unknown[] = [];
+  for (let i = wantStart; i < wantEnd; i++) {
+    if (placed.has(i)) items.push(placed.get(i));
+  }
 
-  // Get subset based on offset/limit
-  const keysToFetch = allKeys.slice(offset, offset + limit);
-
-  const items = await Promise.all(
-    keysToFetch.map(async (key) => {
-      const result = await s3.send(
-        new GetObjectCommand({
-          Bucket: config.s3Bucket,
-          Key: key,
-        })
-      );
-      const body = await result.Body?.transformToString();
-      return body ? JSON.parse(body) : null;
-    })
-  );
-
-  return { items: items.filter(Boolean), total };
+  const lastRange = ranges[ranges.length - 1];
+  const derivedTotal = lastRange ? lastRange.start + lastRange.length : 0;
+  return { items, total: totalHint ?? derivedTotal };
 }
 
 /**
@@ -168,11 +255,51 @@ export async function* iterateDatasetKeys(datasetId: string): AsyncGenerator<str
 /**
  * Fetch one dataset item by S3 key. Used by the streaming download endpoint
  * which iterates keys, then fetches with bounded concurrency.
+ *
+ * Note: this returns the *raw* contents of the S3 object — for `.batch.json`
+ * keys that's a JSON array, for legacy `{idx}.json` keys that's a single
+ * value. Most callers should prefer iterateDatasetItems, which dispatches by
+ * key shape and yields one item at a time.
  */
 export async function getDatasetItemByKey(key: string): Promise<unknown> {
   const result = await s3.send(new GetObjectCommand({ Bucket: config.s3Bucket, Key: key }));
   const body = await result.Body?.transformToString();
   return body ? JSON.parse(body) : null;
+}
+
+/**
+ * Async-iterate over every dataset item, transparently handling both the
+ * legacy per-item key shape (`{idx-9d}.json`) and the batched key shape
+ * (`{startIdx-9d}.batch.json` containing a JSON array).
+ *
+ * Items are yielded in numeric index order across both formats — the 9-digit
+ * zero-padding on both shapes ensures lexicographic listing == numeric order.
+ *
+ * Use this for any read path that needs item-level iteration. The lower-level
+ * iterateDatasetKeys + getDatasetItemByKey are still exported for callers
+ * that want raw key-level control (e.g. parallel fetch with custom batching),
+ * but those callers must dispatch on the `.batch.json` suffix themselves.
+ */
+export async function* iterateDatasetItems(datasetId: string): AsyncGenerator<unknown> {
+  for await (const key of iterateDatasetKeys(datasetId)) {
+    const body = await getDatasetItemByKey(key);
+    if (key.endsWith('.batch.json')) {
+      if (Array.isArray(body)) {
+        for (const item of body) yield item;
+      } else {
+        // Malformed batch object: skip rather than crash a download
+        // mid-stream, but emit a server log so operators see the
+        // integrity issue instead of inheriting a silent gap. A
+        // non-array body in a .batch.json key indicates a writer that
+        // bypassed putDatasetBatch — worth investigating.
+        console.error(
+          `[dataset] malformed batch object at ${key} (body is ${typeof body}, not Array); skipped`
+        );
+      }
+    } else {
+      yield body;
+    }
+  }
 }
 
 /**

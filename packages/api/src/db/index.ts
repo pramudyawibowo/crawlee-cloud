@@ -15,6 +15,7 @@ export async function initDatabase(): Promise<void> {
   pool = new Pool({
     connectionString: config.databaseUrl,
     ssl: useSSL ? { rejectUnauthorized: false } : undefined,
+    max: config.dbPoolMax,
   });
 
   // Test connection

@@ -27,6 +27,16 @@ export interface Config {
   // unauthenticated — only safe behind a private network / VPN. There is
   // intentionally no equivalent flag for /v2/scaler/status (runner IPs).
   metricsPublic: boolean;
+
+  // PG pool ceiling. Default 8 fits DO Managed PG 1GB plan (22-conn ceiling)
+  // with headroom for migrations and admin sessions. Bump on larger plans;
+  // set high (50+) if a PgBouncer/pooler endpoint is in front of PG.
+  dbPoolMax: number;
+
+  // Items per S3 object on dataset push. Default 500. Lower if memory
+  // pressure during downloads is a concern; raise (1000–2000) on Spaces/AWS
+  // to further reduce PUT cost.
+  datasetBatchSize: number;
 }
 
 const isDevelopment = process.env.NODE_ENV !== 'production';
@@ -52,6 +62,24 @@ function envOptional(key: string): string | undefined {
 function envInt(key: string, defaultValue: number): number {
   const value = process.env[key];
   return value ? parseInt(value, 10) : defaultValue;
+}
+
+/**
+ * Like envInt, but rejects values < min at startup with a clear message.
+ * Use for config that would put the app into an unrecoverable state if
+ * misconfigured — e.g. a negative DATASET_BATCH_SIZE makes the dataset
+ * push loop step backward and never terminate (hangs the handler), and
+ * a non-positive DB_POOL_MAX leaves pg-pool unable to allocate a single
+ * connection (every query rejects).
+ */
+function envIntPositive(key: string, defaultValue: number, min = 1): number {
+  const v = envInt(key, defaultValue);
+  if (!Number.isFinite(v) || v < min) {
+    throw new Error(
+      `Invalid ${key}=${process.env[key] ?? '(unset)'} — must be an integer >= ${min}`
+    );
+  }
+  return v;
 }
 
 function envBool(key: string, defaultValue: boolean): boolean {
@@ -90,4 +118,10 @@ export const config: Config = {
   adminPassword: envOptional('ADMIN_PASSWORD'),
 
   metricsPublic: envBool('METRICS_PUBLIC', false),
+
+  // Both must be >= 1: a non-positive DB_POOL_MAX leaves pg-pool unable
+  // to allocate connections; a non-positive DATASET_BATCH_SIZE makes the
+  // push loop step backward and never terminate.
+  dbPoolMax: envIntPositive('DB_POOL_MAX', 8),
+  datasetBatchSize: envIntPositive('DATASET_BATCH_SIZE', 500),
 };
