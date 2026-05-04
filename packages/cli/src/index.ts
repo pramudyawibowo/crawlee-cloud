@@ -12,6 +12,9 @@
  *   login            Authenticate with platform
  */
 
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
 import { initCommand } from './commands/init.js';
 import { runCommand } from './commands/run.js';
@@ -25,12 +28,18 @@ import { listCommand } from './commands/list.js';
 import { profileCommand } from './commands/profile.js';
 import { infoCommand } from './commands/info.js';
 
+// Resolve relative to the compiled file at runtime; both src/index.ts and
+// dist/index.js sit one level below package.json, so '..' is the same in
+// development (tsx) and after build.
+const pkgPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json');
+const { version } = JSON.parse(readFileSync(pkgPath, 'utf8')) as { version: string };
+
 export const program = new Command();
 
 program
   .name('crawlee-cloud')
   .description('CLI for Crawlee Cloud - create, run, and deploy Actors')
-  .version('0.2.0');
+  .version(version);
 
 // Register commands
 program.addCommand(initCommand);
@@ -46,5 +55,3 @@ program.addCommand(profileCommand);
 program.addCommand(infoCommand);
 
 export { program as cli };
-
-// v0.2.1 trigger
