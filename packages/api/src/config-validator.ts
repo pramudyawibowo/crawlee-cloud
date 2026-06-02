@@ -47,6 +47,22 @@ export function validateSecurityConfig(): SecurityValidationResult {
     report(`API_SECRET is too short (${config.apiSecret.length} chars, minimum 32 recommended)`);
   }
 
+  // Proxy password encryption: production must use an explicit key. Dev
+  // falls back to sha256(API_SECRET) — see proxy-crypto.ts.
+  if (isProduction && !process.env.PROXY_ENCRYPTION_KEY) {
+    report('PROXY_ENCRYPTION_KEY must be set in production (64 hex chars = 32 bytes)');
+  }
+  if (
+    process.env.PROXY_ENCRYPTION_KEY &&
+    !/^[0-9a-fA-F]{64}$/.test(process.env.PROXY_ENCRYPTION_KEY)
+  ) {
+    // Hex regex catches both wrong length AND non-hex chars in one check.
+    // Buffer.from(s, 'hex') silently truncates at the first non-hex char,
+    // so a 64-char garbage string would otherwise pass a naive .length === 64
+    // check and break at runtime when the AES key buffer comes back < 32 bytes.
+    report('PROXY_ENCRYPTION_KEY must be exactly 64 hex characters (32 bytes)');
+  }
+
   // Check database credentials
   const dbUrl = config.databaseUrl;
   for (const insecure of INSECURE_DB_PASSWORDS) {
