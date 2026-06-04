@@ -230,6 +230,35 @@ describe('Actor Routes', () => {
       expect(parsed.timeoutSecs).toBe(600);
     });
 
+    it('rejects defaultRunOptions.timeoutSecs above the per-run cap (86400)', async () => {
+      // Cap mismatch fix: CreateActorSchema previously allowed any
+      // positive timeoutSecs, while ActorRunSchema caps explicit run
+      // timeouts at 86400s. Since the same-PR fix now propagates actor
+      // defaults to runs, the uncapped path would let operators bypass
+      // the run-time guardrail. The schema now applies the same cap.
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v2/acts',
+        payload: {
+          name: 'long-running',
+          defaultRunOptions: { timeoutSecs: 200_000 },
+        },
+      });
+      expect(response.statusCode).toBe(400);
+    });
+
+    it('rejects defaultRunOptions.memoryMbytes above the per-run cap (16384)', async () => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v2/acts',
+        payload: {
+          name: 'fat-actor',
+          defaultRunOptions: { memoryMbytes: 100_000 },
+        },
+      });
+      expect(response.statusCode).toBe(400);
+    });
+
     it('persists proxyPassword (encrypted) on create — regression for Codex P2', async () => {
       // The earlier version of this code accepted proxyPassword in
       // CreateActorSchema but the INSERT silently dropped the field.
@@ -449,6 +478,141 @@ describe('Actor Routes', () => {
       });
 
       expect(response.statusCode).toBe(404);
+    });
+
+    it("inherits timeout/memory from actor's default_run_options when request body omits them", async () => {
+      // Actor configured with timeoutSecs=7200, memoryMbytes=4096
+      mockQuery
+        .mockResolvedValueOnce({
+          rows: [
+            createActorRow({
+              default_run_options: { timeoutSecs: 7200, memoryMbytes: 4096 },
+            }),
+          ],
+        }) // get actor
+        .mockResolvedValueOnce({ rows: [] }) // dataset
+        .mockResolvedValueOnce({ rows: [] }) // kv
+        .mockResolvedValueOnce({ rows: [] }) // queue
+        .mockResolvedValueOnce({ rows: [] }) // build lookup
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              id: 'run-1',
+              actor_id: 'actor-1',
+              status: 'READY',
+              started_at: null,
+              default_dataset_id: 'ds',
+              default_key_value_store_id: 'kv',
+              default_request_queue_id: 'rq',
+              timeout_secs: 7200,
+              memory_mbytes: 4096,
+              created_at: new Date(),
+            },
+          ],
+        }); // run INSERT
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v2/acts/actor-1/runs',
+        payload: {}, // no timeout/memory in body
+      });
+
+      expect(response.statusCode).toBe(201);
+      // The run INSERT (last mockQuery call) must bind 7200 and 4096, not 3600 and 1024
+      const insertCall = mockQuery.mock.calls[mockQuery.mock.calls.length - 1] as [
+        string,
+        unknown[],
+      ];
+      expect(insertCall[0]).toContain('INSERT INTO runs');
+      expect(insertCall[1]).toContain(7200); // timeout_secs
+      expect(insertCall[1]).toContain(4096); // memory_mbytes
+    });
+
+    it('request body timeout/memory override actor defaults', async () => {
+      mockQuery
+        .mockResolvedValueOnce({
+          rows: [
+            createActorRow({
+              default_run_options: { timeoutSecs: 7200, memoryMbytes: 4096 },
+            }),
+          ],
+        })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              id: 'run-1',
+              actor_id: 'actor-1',
+              status: 'READY',
+              started_at: null,
+              default_dataset_id: 'ds',
+              default_key_value_store_id: 'kv',
+              default_request_queue_id: 'rq',
+              timeout_secs: 1800,
+              memory_mbytes: 2048,
+              created_at: new Date(),
+            },
+          ],
+        });
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v2/acts/actor-1/runs',
+        payload: { timeout: 1800, memory: 2048 },
+      });
+
+      expect(response.statusCode).toBe(201);
+      const insertCall = mockQuery.mock.calls[mockQuery.mock.calls.length - 1] as [
+        string,
+        unknown[],
+      ];
+      expect(insertCall[1]).toContain(1800);
+      expect(insertCall[1]).toContain(2048);
+      expect(insertCall[1]).not.toContain(7200);
+    });
+
+    it('falls back to 3600/1024 when neither request body nor actor defaults set timeout/memory', async () => {
+      mockQuery
+        .mockResolvedValueOnce({
+          rows: [createActorRow({ default_run_options: null })],
+        })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              id: 'run-1',
+              actor_id: 'actor-1',
+              status: 'READY',
+              started_at: null,
+              default_dataset_id: 'ds',
+              default_key_value_store_id: 'kv',
+              default_request_queue_id: 'rq',
+              timeout_secs: 3600,
+              memory_mbytes: 1024,
+              created_at: new Date(),
+            },
+          ],
+        });
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v2/acts/actor-1/runs',
+        payload: {},
+      });
+
+      expect(response.statusCode).toBe(201);
+      const insertCall = mockQuery.mock.calls[mockQuery.mock.calls.length - 1] as [
+        string,
+        unknown[],
+      ];
+      expect(insertCall[1]).toContain(3600);
+      expect(insertCall[1]).toContain(1024);
     });
 
     it('accepts a per-run webhooks array and persists rows scoped to run_id', async () => {
