@@ -8,7 +8,7 @@ import { CreateScheduleSchema, UpdateScheduleSchema } from '../schemas/schedules
 import { query } from '../db/index.js';
 import { appendSearchCondition } from '../db/search.js';
 import { authenticate } from '../auth/middleware.js';
-import { reloadSchedule, unregisterSchedule } from '../scheduler.js';
+import { computeNextRun } from '../scheduler.js';
 
 interface ScheduleRow {
   id: string;
@@ -56,10 +56,21 @@ export const schedulesRoutes: FastifyPluginAsync = async (fastify) => {
 
     const actorId = (actor.rows[0] as { id: string }).id;
 
+    // Compute next_run_at so the next scheduler tick can pick it up without
+    // a warm-up cycle. Invalid cron expressions are rejected at the route
+    // boundary rather than silently delaying the first fire.
+    let nextRunAt: Date;
+    try {
+      nextRunAt = computeNextRun(data.cronExpression, data.timezone ?? 'UTC');
+    } catch (err) {
+      reply.status(400);
+      return { error: { message: `Invalid cron expression: ${(err as Error).message}` } };
+    }
+
     const id = nanoid();
     const result = await query<ScheduleRow>(
-      `INSERT INTO schedules (id, user_id, actor_id, name, cron_expression, timezone, is_enabled, input)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO schedules (id, user_id, actor_id, name, cron_expression, timezone, is_enabled, input, next_run_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING *`,
       [
         id,
@@ -70,10 +81,9 @@ export const schedulesRoutes: FastifyPluginAsync = async (fastify) => {
         data.timezone ?? 'UTC',
         data.isEnabled ?? true,
         data.input ? JSON.stringify(data.input) : null,
+        nextRunAt,
       ]
     );
-
-    await reloadSchedule(id);
 
     reply.status(201);
     return { data: formatSchedule(result.rows[0]!) };
@@ -174,6 +184,40 @@ export const schedulesRoutes: FastifyPluginAsync = async (fastify) => {
       updates.actorId = (actor.rows[0] as { id: string }).id;
     }
 
+    // Pre-validation: when cron_expression or timezone is changing, OR
+    // when isEnabled is being flipped to true, we need a freshly-computed
+    // next_run_at folded into the SAME UPDATE — so a bad cron value never
+    // persists to the DB, and a re-enabled schedule doesn't inherit a
+    // stale (past) next_run_at that would cause it to fire immediately.
+    //
+    // Gemini bot review on PR #47:
+    //   - Critical: validate cron BEFORE the UPDATE, not after.
+    //   - High: recompute next_run_at when isEnabled flips false → true.
+    const needsRecompute =
+      updates.cronExpression !== undefined ||
+      updates.timezone !== undefined ||
+      updates.isEnabled === true;
+
+    let recomputedNextRunAt: Date | null = null;
+    if (needsRecompute) {
+      const existing = await query<{ cron_expression: string; timezone: string }>(
+        'SELECT cron_expression, timezone FROM schedules WHERE id = $1 AND user_id = $2',
+        [scheduleId, request.user!.id]
+      );
+      if (!existing.rows[0]) {
+        reply.status(404);
+        return { error: { type: 'record-not-found', message: 'Schedule not found' } };
+      }
+      const effectiveCron = updates.cronExpression ?? existing.rows[0].cron_expression;
+      const effectiveTz = updates.timezone ?? existing.rows[0].timezone;
+      try {
+        recomputedNextRunAt = computeNextRun(effectiveCron, effectiveTz);
+      } catch (err) {
+        reply.status(400);
+        return { error: { message: `Invalid cron expression: ${(err as Error).message}` } };
+      }
+    }
+
     const setClauses: string[] = ['modified_at = NOW()'];
     const values: unknown[] = [];
     let paramIndex = 1;
@@ -202,6 +246,10 @@ export const schedulesRoutes: FastifyPluginAsync = async (fastify) => {
       setClauses.push(`input = $${paramIndex++}`);
       values.push(JSON.stringify(updates.input));
     }
+    if (recomputedNextRunAt !== null) {
+      setClauses.push(`next_run_at = $${paramIndex++}`);
+      values.push(recomputedNextRunAt);
+    }
 
     values.push(scheduleId);
 
@@ -218,8 +266,6 @@ export const schedulesRoutes: FastifyPluginAsync = async (fastify) => {
       reply.status(404);
       return { error: { type: 'record-not-found', message: 'Schedule not found' } };
     }
-
-    await reloadSchedule(request.params.scheduleId);
 
     return { data: formatSchedule(result.rows[0]) };
   });
@@ -241,7 +287,9 @@ export const schedulesRoutes: FastifyPluginAsync = async (fastify) => {
         return { error: { type: 'record-not-found', message: 'Schedule not found' } };
       }
 
-      unregisterSchedule(request.params.scheduleId);
+      // No need to unregister an in-process cron job — the next scheduler
+      // tick reads `is_enabled = true` from the DB and naturally ignores
+      // deleted rows.
 
       reply.status(204);
     }
