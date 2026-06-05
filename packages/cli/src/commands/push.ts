@@ -33,6 +33,14 @@ interface ActorJson {
     dataset?: string;
   };
   environmentVariables?: Record<string, string>;
+  // Apify-compatible execution defaults. Carried forward to the actor row
+  // and used by API run-creation / scheduler to populate runs.timeout_secs
+  // and runs.memory_mbytes when the request body omits them.
+  defaultRunOptions?: {
+    build?: string;
+    timeoutSecs?: number;
+    memoryMbytes?: number;
+  };
 }
 
 function validateActorJson(actorJson: ActorJson): string[] {
@@ -180,18 +188,46 @@ export const pushCommand = new Command('push')
     const registerSpinner = ora('Registering with platform...').start();
 
     try {
-      // Check if actor exists
-      const listRes = await fetch(`${config.apiBaseUrl}/v2/acts?limit=200`, {
-        headers: { Authorization: `Bearer ${config.token}` },
-      });
-
+      // Look up by name directly. The /v2/acts/:actorId route accepts
+      // either id or name (`WHERE (id = $1 OR name = $1)`), so one call
+      // serves both existence-check AND baseline-fetch:
+      //   - 200 → actor exists; response carries the full row including
+      //     `defaultRunOptions` used as the baseline below
+      //   - 404 → new actor; no baseline
+      //
+      // Previously we used `/v2/acts?limit=200` and `.find(...)`, which
+      // false-negatived for accounts with more than 200 actors when
+      // re-pushing an older one. That made the API's name-based upsert
+      // take the "new actor" branch on the CLI side, skipping the
+      // baseline fetch and silently clobbering dashboard-only fields
+      // (memoryMbytes / timeoutSecs / etc.). Caught by automated review.
       let existingId: string | null = null;
-      if (listRes.ok) {
-        const listData = (await listRes.json()) as {
-          data: { items: { id: string; name: string }[] };
+      // Baseline for the push payload's defaultRunOptions. The API's
+      // upsert replaces default_run_options wholesale (not a deep merge),
+      // so without this, fields edited via the dashboard but not declared
+      // in actor.json would silently revert on every push.
+      //
+      // Precedence on the merged payload (later wins):
+      //   existing default_run_options (dashboard state)
+      //     < actor.json defaultRunOptions (deploy-time author intent)
+      //     < CLI-managed fields (image, envVars — always asserted by push)
+      let existingDefaultRunOptions: {
+        build?: string;
+        timeoutSecs?: number;
+        memoryMbytes?: number;
+        image?: string;
+        envVars?: Record<string, string>;
+      } = {};
+      const lookupRes = await fetch(
+        `${config.apiBaseUrl}/v2/acts/${encodeURIComponent(actorName)}`,
+        { headers: { Authorization: `Bearer ${config.token}` } }
+      );
+      if (lookupRes.ok) {
+        const lookupData = (await lookupRes.json()) as {
+          data?: { id?: string; defaultRunOptions?: typeof existingDefaultRunOptions };
         };
-        const existing = listData.data.items.find((a) => a.name === actorName);
-        if (existing) existingId = existing.id;
+        existingId = lookupData.data?.id ?? null;
+        existingDefaultRunOptions = lookupData.data?.defaultRunOptions ?? {};
       }
 
       // Resolve actor default env vars. Precedence (later wins):
@@ -211,6 +247,21 @@ export const pushCommand = new Command('push')
         ...dropEmpty(fromFlag),
       };
 
+      // Forward Apify-compatible defaultRunOptions from actor.json, with
+      // existing actor state as the baseline so dashboard-only edits
+      // survive a push.
+      //
+      // Without this:
+      //   - Pre-v0.9.7: actor.json's timeoutSecs/memoryMbytes were silently
+      //     dropped by the CLI and runs always timed out at 3600s.
+      //   - v0.9.7 fixed the API read but the CLI still didn't forward the
+      //     values — the bug appeared "still broken" for CLI-pushed actors.
+      //
+      // The conditional spreads ensure actor.json values are asserted (top
+      // of precedence after CLI-managed image/envVars), while
+      // dashboard-set fields not declared in actor.json fall back to the
+      // existing baseline.
+      const actorJsonDefaults = actorJson.defaultRunOptions ?? {};
       const actorPayload = {
         name: actorName,
         title: actorJson.title,
@@ -220,8 +271,18 @@ export const pushCommand = new Command('push')
         // for the version selector on the dashboard's build history.
         version: actorJson.version,
         defaultRunOptions: {
-          image: runtimeImage,
+          ...existingDefaultRunOptions, // dashboard state baseline
+          image: runtimeImage, // always asserted (this push's build)
           envVars: Object.keys(mergedEnvVars).length > 0 ? mergedEnvVars : undefined,
+          // Optional Apify-spec fields — only override when actor.json
+          // explicitly declares them.
+          ...(actorJsonDefaults.build !== undefined && { build: actorJsonDefaults.build }),
+          ...(actorJsonDefaults.timeoutSecs !== undefined && {
+            timeoutSecs: actorJsonDefaults.timeoutSecs,
+          }),
+          ...(actorJsonDefaults.memoryMbytes !== undefined && {
+            memoryMbytes: actorJsonDefaults.memoryMbytes,
+          }),
         },
       };
 
