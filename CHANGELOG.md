@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.9] - 2026-06-06
+
+### Fixed
+
+- **Autoscaler scale-down freeze when a zombie RUNNING row exists.** Live production state observed at v0.9.8: `desired=10` held for 5+ hours with `ready=0, running=2`. Two interacting bugs in the scaler:
+
+  1. **`calculateDesiredRunners`** returned `currentRunners` whenever `ready <= scaleUpThreshold`, regardless of direction. The intent was hysteresis (don't scale UP on a trickle), but the unconditional return also suppressed scale-DOWN — so once a burst lifted the count, a long-running tail (`running > 0, ready == 0`) kept `totalDemand > 0` and pinned the cluster at high-water. The TODO block at the original site documented this and offered two fix shapes; the corrected Shape A is applied: `if (ready <= threshold && clamped > current && current >= minRunners) return current`. The `current >= minRunners` clause is load-bearing — it preserves the cold-start floor (otherwise a system below `min` with low demand could not bring its first runner up).
+
+  2. **`scalingLoop`** refreshed `scaler:last-activity` whenever `stats.total > 0`, where `stats.total` is a DB count that **includes zombie RUNNING rows**. Even after fix #1, the existing `idleTimeoutSecs` gate in `scalingLoop` kept blocking scale-down because `idleMs` stayed near zero forever — the math correctly said `desired < current`, but `scaleDown` was never called.
+
+     The activity gate now cross-references two sources of truth: which run IDs are RUNNING in the DB (with `started_at`), and which run IDs each live runner claims via its heartbeat (`heartbeat.ts:119` already publishes `runIds`). A RUNNING row counts as real work if either (a) some live heartbeat claims it, or (b) it was picked up within `PICKUP_GRACE_MS` (90s = 3× heartbeat interval) and the claim simply hasn't landed yet. Older RUNNING rows with no live claim are zombies and do not refresh activity.
+
+     This shape was reached after the initial v0.9.9 attempt — a naive `realActivity = stats.ready > 0 || runners.some(r => r.activeRuns > 0)` — was flagged on PR #52 (Codex P1) for opening a race window during legitimate pickup: when an idle cluster picks up a fresh run via Redis pub/sub (sub-second), the DB shows `RUNNING` immediately, but the runner's most recent heartbeat (up to ~30s stale) still reports `activeRuns: 0`. In that window the naive gate would have destroyed the just-busy runner mid-pickup. The runId+`started_at` correlation closes that window precisely without re-opening the zombie freeze.
+
+  Both fixes are required to clear the freeze. Verified by direct reproduction against the compiled artifact (`packages/api/dist/scaler/index.js`) prior to the patch and by 46 unit tests after (including the Codex P1 race-window regression).
+
+- **Defensive coercion in `calculateDesiredRunners`** for `NaN` / negative / non-finite inputs. The function decides how many droplets to spawn; a malformed `COUNT(*)` parse should not be able to feed unbounded numbers into the math. `Math.max(0, Number.isFinite(x) ? x : 0)` applied to `ready`, `running`, and `currentRunners`.
+
+### Added
+
+- **`scaler-decisions.test.ts`**: 5 new tests for `calculateDesiredRunners` (freeze repro, scale-down through threshold, hysteresis-up at threshold-equal demand, cold-start floor rule regression guard, NaN/negative input coercion) plus 6 new tests for the pure `countLiveRunning` correlation helper (heartbeat-claim path, fresh-pickup grace path, stale-zombie rejection, null `started_at`, mixed batch, empty input).
+- **`scaler-loop.test.ts`**: 4 new tests — zombie-RUNNING-no-live-runner must NOT refresh `LAST_ACTIVITY`; live-runner-claims-runId must refresh; pickup-race-with-stale-heartbeat must refresh AND must not destroy the just-busy runner (Codex #52 P1 regression); RUNNING row older than grace with no claim must NOT refresh.
+- **Heartbeat plumbing**: `getActiveRunners()` now also returns `claimedRunIds: Set<string>`. The heartbeat parser preserves `runIds` (was previously dropped — older runner builds publish all the other fields but no `runIds`; the scaler tolerates this and falls back to the `started_at` grace window).
+
+### Dashboard
+
+- **SUCCEEDED status chips are now green, not brand-orange.** A new semantic `--ok` token (`#1a7f37` light / `#3fb950` dark) decouples success state from the brand `--signal` (orange). Prior to this, SUCCEEDED, ABORTED (amber), and FAILED (vermilion in dark mode) all sat in nearby warm hues and were hard to distinguish at a scan. The brand `--signal` itself is unchanged — buttons, links, focus rings, CRC logo, and the throughput chart's "volume" bars stay orange. The change is scoped to the `success` Badge variant in `components/ui/badge.tsx`, so every consumer of `StatusChip` (runs list, run detail, builds, webhooks, actor detail) picks it up without further edits.
+
+### Notes for operators
+
+- **Behavioral change is minimal for healthy workloads.** The `idleTimeoutSecs` gate is unchanged — under steady load, `realActivity` evaluates true (via ready or active heartbeats), `LAST_ACTIVITY` refreshes, and scale-down stays blocked just like before. The only behavioral delta is in the zombie-tail case (the bug being fixed). No env vars added, no schema changes, no provider changes.
+- **Known follow-up for v0.9.10 / 1.0** (not blocking the freeze fix): a dedicated reaper that times out stale RUNNING rows whose effective `timeoutSecs + grace` has elapsed. The scaler is now resilient to such rows; the data-integrity cleanup is a separate hardening pass. Also worth fixing: `DigitalOceanProvider.listRunners()` pages at `per_page=100` with no pagination — a deployment with more than 100 tagged droplets silently underreports capacity.
+
 ## [0.9.8] - 2026-06-05
 
 ### Fixed
