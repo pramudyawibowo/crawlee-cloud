@@ -121,32 +121,59 @@ function RunDetail() {
     };
   }, [id]);
 
-  // Resolve the actor lazily once we know which one this run targeted.
+  // Reset run-scoped lazy state when navigating to a different run. The
+  // App Router keeps this component mounted across /runs/A -> /runs/B (only
+  // the param changes), so without this the "already fetched" guards below
+  // (input !== undefined, dataset !== null, runWebhooks !== null) would pin
+  // the PREVIOUS run's data on screen forever. Keyed on the route param so
+  // the reset lands at navigation time, not after the new run's fetch.
+  // `actor` is intentionally NOT reset: it's actor-scoped, not run-scoped —
+  // the [actId] effect below refetches it iff the new run targets a
+  // different actor, and nulling it here would orphan it when actId is
+  // unchanged (same-actor navigation, e.g. retry links).
   useEffect(() => {
-    if (!run) return;
+    setInput(undefined);
+    setDataset(null);
+    setRunWebhooks(null);
+    setDeliveriesByWebhook({});
+  }, [id]);
+
+  // Resolve the actor lazily once we know which one this run targeted.
+  // Depend on the stable actId primitive, NOT the `run` object: the 2s
+  // poll loop replaces the run reference on every tick, which re-fired
+  // this effect (a fresh GET /v2/acts/:id) ~1800×/hour per open tab.
+  const actId = run?.actId;
+  useEffect(() => {
+    if (!actId) return;
     let alive = true;
-    getActor(run.actId)
+    getActor(actId)
       .then((a) => alive && setActor(a))
       .catch(() => {});
     return () => {
       alive = false;
     };
-  }, [run]);
+  }, [actId]);
 
   // Per-run webhooks: fetch once on first load. They can't be mutated after
   // dispatch (PUT is rejected server-side via `run_id IS NULL`), so polling
   // adds no value — only the deliveries can change, and operators see those
   // on /webhooks if they need detail.
+  const loadedRunId = run?.id;
   useEffect(() => {
-    if (!run || runWebhooks !== null) return;
+    // `loadedRunId !== id` gate: right after navigation, `run` still holds
+    // the PREVIOUS run (its poll hasn't resolved) while the reset effect
+    // has already nulled runWebhooks — without the gate this effect would
+    // fetch the old run's webhooks and, once stored, the runWebhooks
+    // sentinel would block the new run's fetch forever.
+    if (!loadedRunId || loadedRunId !== id || runWebhooks !== null) return;
     let alive = true;
-    getWebhooks({ scope: 'run', runId: run.id, limit: 50 })
+    getWebhooks({ scope: 'run', runId: loadedRunId, limit: 50 })
       .then((page) => alive && setRunWebhooks(page.items))
       .catch(() => alive && setRunWebhooks([]));
     return () => {
       alive = false;
     };
-  }, [run, runWebhooks]);
+  }, [loadedRunId, runWebhooks]);
 
   // Lazy-load tab data on demand
   useEffect(() => {
