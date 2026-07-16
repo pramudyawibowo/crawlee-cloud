@@ -1096,21 +1096,29 @@ async function scaleUp(count: number): Promise<void> {
     );
   }
 
-  for (let i = 0; i < count; i++) {
-    try {
-      const runner = await provider.createRunner({
-        region: config.runnerRegion,
-        size: config.runnerSize,
-        sshKeyId: config.sshKeyId,
-        userData: getCloudInitScript(config.runsPerRunner, priceHourly),
-        tags: ['crawlee-runner', 'auto-scaled'],
-        runsPerRunner: config.runsPerRunner,
-      });
-      console.log(`[Scaler] Created runner ${runner.id} at ${runner.ip}`);
-    } catch (err) {
-      console.error(`[Scaler] Failed to create runner:`, (err as Error).message);
-    }
-  }
+  // Parallel, not serial: createRunner waits for the droplet to become
+  // active (~40s each), so a serial 9-droplet burst held the scaler tick
+  // — and its advisory lock — for ~6 minutes (observed 2026-07-16):
+  // zombie reaping, demand recalculation, and the dashboard's runners
+  // snapshot all froze for the duration, and the last droplet started
+  // booting 6 minutes after the first. Failures stay per-droplet.
+  await Promise.allSettled(
+    Array.from({ length: count }, async () => {
+      try {
+        const runner = await provider.createRunner({
+          region: config.runnerRegion,
+          size: config.runnerSize,
+          sshKeyId: config.sshKeyId,
+          userData: getCloudInitScript(config.runsPerRunner, priceHourly),
+          tags: ['crawlee-runner', 'auto-scaled'],
+          runsPerRunner: config.runsPerRunner,
+        });
+        console.log(`[Scaler] Created runner ${runner.id} at ${runner.ip}`);
+      } catch (err) {
+        console.error(`[Scaler] Failed to create runner:`, (err as Error).message);
+      }
+    })
+  );
 }
 
 async function scaleDown(runners: RunnerInfo[], count: number): Promise<void> {
@@ -1187,6 +1195,24 @@ async function scalingLoop(): Promise<void> {
       const reap = await reapDeadRunners(active.runners);
       const runners = reap.survivors;
       const currentCount = runners.length;
+
+      // Persist the runners snapshot EARLY, not only at tick end: a
+      // scale-up burst used to hold this tick for minutes (serial droplet
+      // creation), the key's TTL expired mid-tick, and the dashboard's
+      // Runners page showed an empty fleet exactly while DO was visibly
+      // creating droplets (observed live 2026-07-16 during a 9-droplet
+      // burst). Best-effort — a Redis blip must not abort the tick; the
+      // end-of-tick write refreshes the TTL after long ticks.
+      try {
+        await redis.set(
+          RUNNERS_KEY,
+          JSON.stringify(runners),
+          'EX',
+          Math.max(120, config.pollIntervalSecs * 4)
+        );
+      } catch (err) {
+        console.warn('[Scaler] Early runners-snapshot write failed:', (err as Error).message);
+      }
 
       // Terminalize the destroyed runners' RUNNING rows NOW (attribution
       // via the claim-time runner_id stamp) instead of letting them sit

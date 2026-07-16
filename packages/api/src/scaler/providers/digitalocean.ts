@@ -46,7 +46,11 @@ export class DigitalOceanProvider implements RunnerProvider {
   }
 
   async createRunner(config: RunnerConfig): Promise<RunnerInfo> {
-    const name = `crawlee-runner-${Date.now()}`;
+    // Random suffix: scale-up creates droplets in PARALLEL since
+    // 2026-07-16, so Date.now() alone collides within a batch — and the
+    // droplet name doubles as the hostname the scaler's heartbeat
+    // name-fallback matches on, where duplicates would cross-match.
+    const name = `crawlee-runner-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
     console.log(`[Scaler/DO] Creating Droplet ${name} (${config.size}) in ${config.region}`);
 
