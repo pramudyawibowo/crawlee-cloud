@@ -308,6 +308,33 @@ ALTER TABLE runs ADD COLUMN IF NOT EXISTS retry_count INTEGER DEFAULT 0;
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS origin_run_id VARCHAR(21);
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS run_after TIMESTAMPTZ;
 
+-- Run cost attribution (see docs/superpowers/specs/2026-07-15-run-cost-analysis-design.md).
+-- Stamped by the runner at claim time (packages/runner/src/queue.ts):
+--   runner_id           — runner identity (DO droplet id, hostname fallback)
+--   runner_price_hourly — droplet $/hr captured at claim time; NULL when
+--                         unknown (local-docker, price lookup failure).
+--                         Claim-time capture keeps historical runs accurate
+--                         if DO reprices.
+--   runner_provider     — 'digitalocean' | 'local-docker'
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS runner_id TEXT;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS runner_price_hourly NUMERIC;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS runner_provider TEXT;
+
+-- Peak observed container memory (working set, MB), sampled every 15s by
+-- the runner while the container executes (docker.ts, written by the
+-- terminal UPDATE in queue.ts). NULL = unmeasured: pre-feature run, run
+-- shorter than one sampling tick, or stats-API failures. This is the
+-- data source for per-actor memory right-sizing — memory_mbytes limits
+-- were operator guesses until it existed (2026-07-16 incident: over- AND
+-- under-provisioned actors on the same fleet), and any future
+-- reservation/overcommit packing policy starts from these actuals.
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS peak_memory_mb INTEGER;
+
+-- Sibling-overlap lookup for GET /v2/actor-runs/:runId/cost:
+-- WHERE runner_id = $1 AND started_at < $end AND COALESCE(finished_at, NOW()) > $start
+CREATE INDEX IF NOT EXISTS idx_runs_runner_window
+  ON runs(runner_id, started_at);
+
 -- Retention slice #3: tombstone audit log for reaped resources.
 -- BIGSERIAL diverges from the project-wide VARCHAR(21) nanoid convention
 -- because tombstones are operator-internal — never user-referenced, never
