@@ -223,11 +223,11 @@ See [deploy/](deploy/) for detailed instructions.
 
 ## What's New
 
-**v1.0.0** — semver stability commitment. The Apify v2 compatibility surface (run / dataset / KV / queue / build / webhook endpoints and response shapes), `crc` CLI commands, and documented operator env vars are now stable; breaking changes require a MAJOR bump from here on. This release also adds live dataset item counts on the runs grid, 5-second auto-refresh, and a semantic-green success colour separated from the brand orange. See the [full changelog](CHANGELOG.md#100---2026-06-06).
+**v1.4.0** — cost visibility everywhere. The runs list now shows what each finished run cost you at a glance, backed by a batch cost endpoint (`GET /v2/actor-runs/costs`) that answers a whole page in two queries; run details already carried the full breakdown — your cost via actual-overlap droplet attribution vs what the same run would cost on Apify, with savings %. See the [full changelog](CHANGELOG.md#140---2026-07-19).
 
-The 0.9.x line that led into 1.0 covered: multi-replica API safety with Postgres advisory-lock leader election (v0.9.7), poll-based scheduler (v0.9.7), CLI forwarding of `actor.json` `defaultRunOptions` (v0.9.8), and the autoscaler scale-down freeze fix with heartbeat / `started_at` correlation against zombie RUNNING rows (v0.9.9).
+The 1.1–1.3 line that led here covered: the zombie-run reliability overhaul from a live production incident — Redis-blip-proof dead-runner detection, a zombie-run reaper, OOM kills made visible, failed-run logs archived to KV, prebuilt runner images cutting ~4.5 min off scale-up (v1.1.x); memory-aware placement, fast dead-runner reap, and the claim-time cost-attribution stamps (v1.2.0); ingest hot-path performance and runner-key self-healing (v1.2.1/1.2.2); and the run-details cost analysis card (v1.3.0).
 
-> **Upgrading from v0.9.9 to v1.0.0** is a drop-in: no schema migration, no env-var changes, no provider changes. If you're coming from v0.8.x or earlier, walk the CHANGELOG forward — the breaking notes are flagged inline at each release.
+> **Upgrading from v1.3.x to v1.4.0** is a drop-in: no schema migration, no env-var changes, API + dashboard redeploy only. From v1.2.x, also note the optional `APIFY_CU_PRICE` (default `0.40`) added in 1.3.0. From v1.0.x or earlier, walk the [CHANGELOG](CHANGELOG.md) forward — deploy notes are flagged inline at each release.
 
 ---
 
