@@ -220,7 +220,7 @@ export default function RunsPage() {
         description: err instanceof Error ? err.message : 'Could not query run metadata',
       });
     });
-  }, []);
+  }, [toast]);
 
   // Status filter changed (or initial mount): jump to page 0 and refetch.
   useEffect(() => {

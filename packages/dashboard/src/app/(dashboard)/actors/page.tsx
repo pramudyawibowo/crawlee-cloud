@@ -45,8 +45,8 @@ export default function ActorsPage() {
             webhooks are kept but detached from the actor.
           </p>
           <p className="mt-2">
-            Runs, their webhook deliveries, and run history are kept by default. Datasets, key-value
-            stores, and request queues created by those runs are never deleted.
+            Existing runs block deletion by default. Datasets, key-value stores, and request queues
+            created by those runs are never deleted.
           </p>
           <label className="flex items-start gap-2 text-[12px] mt-3 cursor-pointer">
             <input
@@ -58,7 +58,7 @@ export default function ActorsPage() {
             />
             <span>
               Force delete: permanently delete the actor&apos;s runs and their webhook deliveries
-              too.
+              too. Active runs must be aborted and fully terminated first.
             </span>
           </label>
         </>

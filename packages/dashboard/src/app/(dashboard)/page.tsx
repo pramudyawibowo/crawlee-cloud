@@ -15,6 +15,8 @@ type Stats = Awaited<ReturnType<typeof getDashboardStats>>;
 export default function ConsolePage() {
   const toast = useToast();
   const lastRefreshError = useRef<string | null>(null);
+  const lastActorsError = useRef<string | null>(null);
+  const lastHistogramError = useRef<string | null>(null);
   const [stats, setStats] = useState<Stats>({
     totalRuns: 0,
     activeActors: 0,
@@ -56,15 +58,19 @@ export default function ConsolePage() {
           getDashboardStats(),
           getRuns(),
           getActors({ limit: FETCH_ALL_LIMIT }).catch((err: unknown) => {
-            toast.error('Could not load actors', {
-              description: err instanceof Error ? err.message : 'Actor query failed',
-            });
+            const message = err instanceof Error ? err.message : 'Actor query failed';
+            if (lastActorsError.current !== message) {
+              lastActorsError.current = message;
+              toast.error('Could not load actors', { description: message });
+            }
             return null;
           }),
           getRunsHistogram(24).catch((err: unknown) => {
-            toast.error('Could not load run chart', {
-              description: err instanceof Error ? err.message : 'Histogram query failed',
-            });
+            const message = err instanceof Error ? err.message : 'Histogram query failed';
+            if (lastHistogramError.current !== message) {
+              lastHistogramError.current = message;
+              toast.error('Could not load run chart', { description: message });
+            }
             return null;
           }),
         ]);
@@ -72,7 +78,11 @@ export default function ConsolePage() {
         setStats(s);
         setRuns(r);
         lastRefreshError.current = null;
-        if (h) setHistogramBuckets(h.buckets);
+        lastActorsError.current = null;
+        lastHistogramError.current = null;
+        if (h) {
+          setHistogramBuckets(h.buckets);
+        }
         const map: Record<string, Actor> = {};
         if (a) a.items.forEach((x) => (map[x.id] = x));
         setActorsById(map);

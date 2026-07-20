@@ -441,6 +441,32 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
       // The schema deliberately keeps the default FK behaviour. Force delete
       // performs the cascade explicitly in the route, scoped to the actor and
       // tenant, so existing installations do not need a destructive migration.
+      const activeRuns = await query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM runs r
+         JOIN actors a ON a.id = r.actor_id
+         WHERE (a.id = $1 OR a.name = $1) AND a.user_id = $2
+           AND r.status IN ('READY', 'RUNNING', 'ABORTING')`,
+        [actorId, request.user!.id]
+      );
+      if (Number(activeRuns.rows[0]?.count ?? 0) > 0) {
+        reply.status(409);
+        return {
+          error: {
+            type: 'actor-has-active-runs',
+            message:
+              'Actor has active runs. Abort them and wait for termination before force deleting.',
+          },
+        };
+      }
+      await query(
+        `DELETE FROM webhook_deliveries
+         WHERE run_id IN (
+           SELECT r.id FROM runs r
+           JOIN actors a ON a.id = r.actor_id
+           WHERE (a.id = $1 OR a.name = $1) AND a.user_id = $2
+         )`,
+        [actorId, request.user!.id]
+      );
       await query(
         `DELETE FROM runs
          WHERE actor_id IN (
