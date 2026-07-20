@@ -416,7 +416,8 @@ describe('Actor Routes', () => {
 
   describe('DELETE /v2/acts/:actorId', () => {
     it('should delete actor', async () => {
-      mockQuery.mockResolvedValueOnce({ rows: [] });
+      mockQuery.mockResolvedValueOnce({ rows: [{ count: '0' }] });
+      mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 });
 
       const response = await app.inject({
         method: 'DELETE',
@@ -424,6 +425,26 @@ describe('Actor Routes', () => {
       });
 
       expect(response.statusCode).toBe(204);
+    });
+
+    it('force deletes an actor and cascades its runs', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 });
+      mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 });
+      const response = await app.inject({
+        method: 'DELETE',
+        url: '/v2/acts/actor-1?force=true',
+      });
+      expect(response.statusCode).toBe(204);
+      expect(mockQuery).toHaveBeenCalledTimes(2);
+      expect(mockQuery.mock.calls[0]?.[0]).toContain('DELETE FROM runs');
+      expect(mockQuery.mock.calls[1]?.[0]).toContain('DELETE FROM actors');
+    });
+
+    it('rejects a non-force delete when runs exist', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [{ count: '2' }] });
+      const response = await app.inject({ method: 'DELETE', url: '/v2/acts/actor-1' });
+      expect(response.statusCode).toBe(409);
+      expect(mockQuery).toHaveBeenCalledTimes(1);
     });
   });
 

@@ -411,8 +411,45 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
   /**
    * DELETE /v2/acts/:actorId - Delete actor (user-scoped)
    */
-  fastify.delete<{ Params: { actorId: string } }>('/acts/:actorId', async (request, reply) => {
+  fastify.delete<{
+    Params: { actorId: string };
+    Querystring: { force?: string | boolean };
+  }>('/acts/:actorId', async (request, reply) => {
     const { actorId } = request.params;
+    const force = request.query.force === true || request.query.force === 'true';
+
+    // Keep the default delete safe: callers must explicitly opt in before
+    // removing the actor's execution history. The count is scoped by user so
+    // a guessed actor id/name cannot reveal another tenant's runs.
+    if (!force) {
+      const runs = await query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM runs r
+         JOIN actors a ON a.id = r.actor_id
+         WHERE (a.id = $1 OR a.name = $1) AND a.user_id = $2`,
+        [actorId, request.user!.id]
+      );
+      if (Number(runs.rows[0]?.count ?? 0) > 0) {
+        reply.status(409);
+        return {
+          error: {
+            type: 'actor-has-runs',
+            message: 'Actor has runs. Set force=true to delete the actor and its runs.',
+          },
+        };
+      }
+    } else {
+      // The schema deliberately keeps the default FK behaviour. Force delete
+      // performs the cascade explicitly in the route, scoped to the actor and
+      // tenant, so existing installations do not need a destructive migration.
+      await query(
+        `DELETE FROM runs
+         WHERE actor_id IN (
+           SELECT id FROM actors WHERE (id = $1 OR name = $1) AND user_id = $2
+         )`,
+        [actorId, request.user!.id]
+      );
+    }
+
     const result = await query(
       `DELETE FROM actors WHERE (id = $1 OR name = $1) AND user_id = $2 RETURNING id`,
       [actorId, request.user!.id]

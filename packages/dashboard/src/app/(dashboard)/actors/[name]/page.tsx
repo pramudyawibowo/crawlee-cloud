@@ -116,14 +116,33 @@ export default function ActorDetailPage({ params }: { params: Promise<{ name: st
 
   async function handleDelete() {
     if (!actor) return;
+    let force = false;
     const ok = await confirm({
       tone: 'danger',
       title: `Delete actor "${actor.name}"?`,
       description: (
         <>
-          Removes the actor record, default storage, and all build history. Run logs and datasets
-          are kept.
-          <br />
+          <p>
+            Deletes this actor, all actor versions, build history, and schedules. Actor-scoped
+            webhooks are kept but detached from the actor.
+          </p>
+          <p className="mt-2">
+            Runs, their webhook deliveries, and run history are kept by default. Datasets, key-value
+            stores, and request queues created by those runs are never deleted.
+          </p>
+          <label className="flex items-start gap-2 text-[12px] mt-3 cursor-pointer">
+            <input
+              type="checkbox"
+              className="mt-0.5 accent-red-500"
+              onChange={(event) => {
+                force = event.currentTarget.checked;
+              }}
+            />
+            <span>
+              Force delete: permanently delete the actor&apos;s runs and their webhook deliveries
+              too.
+            </span>
+          </label>
           <span className="text-foreground font-mono">This cannot be undone.</span>
         </>
       ),
@@ -131,7 +150,7 @@ export default function ActorDetailPage({ params }: { params: Promise<{ name: st
     });
     if (!ok) return;
     try {
-      await deleteActor(actor.id);
+      await deleteActor(actor.id, { force });
       toast.success(`Actor "${actor.name}" deleted`);
       router.push(prefixPath('/actors'));
     } catch (err) {

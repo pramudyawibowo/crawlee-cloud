@@ -34,16 +34,40 @@ export default function ActorsPage() {
    * the component).
    */
   async function handleDelete(actor: Actor) {
+    let force = false;
     const ok = await confirm({
       tone: 'danger',
       title: `Delete actor "${actor.title || actor.name}"?`,
-      description:
-        'Actor definition, builds, schedules, webhooks, and runs are removed permanently. Datasets and key-value stores produced by past runs stay. Cannot be undone.',
+      description: (
+        <>
+          <p>
+            Deletes this actor, all actor versions, build history, and schedules. Actor-scoped
+            webhooks are kept but detached from the actor.
+          </p>
+          <p className="mt-2">
+            Runs, their webhook deliveries, and run history are kept by default. Datasets, key-value
+            stores, and request queues created by those runs are never deleted.
+          </p>
+          <label className="flex items-start gap-2 text-[12px] mt-3 cursor-pointer">
+            <input
+              type="checkbox"
+              className="mt-0.5 accent-red-500"
+              onChange={(event) => {
+                force = event.currentTarget.checked;
+              }}
+            />
+            <span>
+              Force delete: permanently delete the actor&apos;s runs and their webhook deliveries
+              too.
+            </span>
+          </label>
+        </>
+      ),
       confirmLabel: 'delete actor',
     });
     if (!ok) return;
     try {
-      await deleteActor(actor.id);
+      await deleteActor(actor.id, { force });
       setActors((prev) => prev.filter((a) => a.id !== actor.id));
       setTotal((t) => Math.max(0, t - 1));
       toast.success('Actor deleted');
