@@ -423,9 +423,9 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
     // a guessed actor id/name cannot reveal another tenant's runs.
     if (!force) {
       const runs = await query<{ count: string }>(
-        `SELECT COUNT(*)::text AS count FROM runs r
-         JOIN actors a ON a.id = r.actor_id
-         WHERE (a.id = $1 OR a.name = $1) AND a.user_id = $2`,
+        `SELECT COUNT(*)::text AS count FROM runs
+         WHERE user_id = $2
+           AND actor_id IN (SELECT id FROM actors WHERE (id = $1 OR name = $1) AND user_id = $2)`,
         [actorId, request.user!.id]
       );
       if (Number(runs.rows[0]?.count ?? 0) > 0) {
@@ -442,10 +442,10 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
       // performs the cascade explicitly in the route, scoped to the actor and
       // tenant, so existing installations do not need a destructive migration.
       const activeRuns = await query<{ count: string }>(
-        `SELECT COUNT(*)::text AS count FROM runs r
-         JOIN actors a ON a.id = r.actor_id
-         WHERE (a.id = $1 OR a.name = $1) AND a.user_id = $2
-           AND r.status IN ('READY', 'RUNNING', 'ABORTING')`,
+        `SELECT COUNT(*)::text AS count FROM runs
+         WHERE user_id = $2
+           AND actor_id IN (SELECT id FROM actors WHERE (id = $1 OR name = $1) AND user_id = $2)
+           AND status IN ('READY', 'RUNNING', 'ABORTING')`,
         [actorId, request.user!.id]
       );
       if (Number(activeRuns.rows[0]?.count ?? 0) > 0) {
@@ -461,17 +461,16 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
       await query(
         `DELETE FROM webhook_deliveries
          WHERE run_id IN (
-           SELECT r.id FROM runs r
-           JOIN actors a ON a.id = r.actor_id
-           WHERE (a.id = $1 OR a.name = $1) AND a.user_id = $2
+           SELECT id FROM runs
+           WHERE user_id = $2
+             AND actor_id IN (SELECT id FROM actors WHERE (id = $1 OR name = $1) AND user_id = $2)
          )`,
         [actorId, request.user!.id]
       );
       await query(
         `DELETE FROM runs
-         WHERE actor_id IN (
-           SELECT id FROM actors WHERE (id = $1 OR name = $1) AND user_id = $2
-         )`,
+         WHERE user_id = $2
+           AND actor_id IN (SELECT id FROM actors WHERE (id = $1 OR name = $1) AND user_id = $2)`,
         [actorId, request.user!.id]
       );
     }
