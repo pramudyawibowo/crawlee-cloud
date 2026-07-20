@@ -78,14 +78,16 @@ export default function ConsolePage() {
         setStats(s);
         setRuns(r);
         lastRefreshError.current = null;
-        lastActorsError.current = null;
-        lastHistogramError.current = null;
+        if (a) lastActorsError.current = null;
         if (h) {
+          lastHistogramError.current = null;
           setHistogramBuckets(h.buckets);
         }
-        const map: Record<string, Actor> = {};
-        if (a) a.items.forEach((x) => (map[x.id] = x));
-        setActorsById(map);
+        if (a) {
+          const map: Record<string, Actor> = {};
+          a.items.forEach((x) => (map[x.id] = x));
+          setActorsById(map);
+        }
       } catch (err) {
         console.error('dashboard refresh failed', err);
         const message = err instanceof Error ? err.message : 'Could not load dashboard data';
