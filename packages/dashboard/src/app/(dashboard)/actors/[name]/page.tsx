@@ -22,6 +22,7 @@ import {
   CheckCircle2,
 } from 'lucide-react';
 import { AppLink } from '@/components/app-link';
+import { DeleteActorConfirmContent } from '@/components/delete-actor-confirm-content';
 import { CopyButton } from '@/components/ui/copy-button';
 import { prefixPath } from '@/lib/path-prefix';
 import { Badge, StatusChip } from '@/components/ui/badge';
@@ -121,30 +122,12 @@ export default function ActorDetailPage({ params }: { params: Promise<{ name: st
       tone: 'danger',
       title: `Delete actor "${actor.name}"?`,
       description: (
-        <>
-          <p>
-            Deletes this actor, all actor versions, build history, and schedules. Actor-scoped
-            webhooks are kept but detached from the actor.
-          </p>
-          <p className="mt-2">
-            Existing runs block deletion by default. Datasets, key-value stores, and request queues
-            created by those runs are never deleted.
-          </p>
-          <label className="flex items-start gap-2 text-[12px] mt-3 cursor-pointer">
-            <input
-              type="checkbox"
-              className="mt-0.5 accent-red-500"
-              onChange={(event) => {
-                force = event.currentTarget.checked;
-              }}
-            />
-            <span>
-              Force delete: permanently delete the actor&apos;s runs and their webhook deliveries
-              too. Active runs must be aborted and fully terminated first.
-            </span>
-          </label>
-          <span className="text-foreground font-mono">This cannot be undone.</span>
-        </>
+        <DeleteActorConfirmContent
+          showUndoneWarning
+          onForceChange={(val) => {
+            force = val;
+          }}
+        />
       ),
       confirmLabel: 'delete actor',
     });

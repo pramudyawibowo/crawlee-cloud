@@ -13,6 +13,8 @@ import { PAGE_SIZE } from '@/lib/constants';
 import { useDebouncedSearch } from '@/lib/use-debounced-search';
 import { usePageParam } from '@/lib/use-page-param';
 
+import { DeleteActorConfirmContent } from '@/components/delete-actor-confirm-content';
+
 export default function ActorsPage() {
   const { offset, setOffset, query, setQuery } = usePageParam();
   const [search, setSearch] = useDebouncedSearch(query, setQuery);
@@ -39,29 +41,11 @@ export default function ActorsPage() {
       tone: 'danger',
       title: `Delete actor "${actor.title || actor.name}"?`,
       description: (
-        <>
-          <p>
-            Deletes this actor, all actor versions, build history, and schedules. Actor-scoped
-            webhooks are kept but detached from the actor.
-          </p>
-          <p className="mt-2">
-            Existing runs block deletion by default. Datasets, key-value stores, and request queues
-            created by those runs are never deleted.
-          </p>
-          <label className="flex items-start gap-2 text-[12px] mt-3 cursor-pointer">
-            <input
-              type="checkbox"
-              className="mt-0.5 accent-red-500"
-              onChange={(event) => {
-                force = event.currentTarget.checked;
-              }}
-            />
-            <span>
-              Force delete: permanently delete the actor&apos;s runs and their webhook deliveries
-              too. Active runs must be aborted and fully terminated first.
-            </span>
-          </label>
-        </>
+        <DeleteActorConfirmContent
+          onForceChange={(val) => {
+            force = val;
+          }}
+        />
       ),
       confirmLabel: 'delete actor',
     });
