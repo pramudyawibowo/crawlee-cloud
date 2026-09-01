@@ -22,6 +22,7 @@ import {
 import { useConfirm } from '@/components/ui/confirm';
 import { useToast } from '@/components/ui/toast';
 import { Badge } from '@/components/ui/badge';
+import { useAuth } from '@/lib/auth';
 import {
   createApiKey,
   getMyApifyProfile,
@@ -45,6 +46,7 @@ import { cn } from '@/lib/utils';
 export default function SettingsPage() {
   const confirm = useConfirm();
   const toast = useToast();
+  const { user: authUser } = useAuth();
   const API_BASE = getApiUrl();
 
   const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
@@ -59,6 +61,8 @@ export default function SettingsPage() {
   const [proxyInput, setProxyInput] = useState('');
   const [proxyBusy, setProxyBusy] = useState(false);
   const [proxyReplaceMode, setProxyReplaceMode] = useState(false);
+
+  const isAdmin = authUser?.role === 'admin' || user?.role === 'admin';
 
   // OIDC & Dynamic Settings state
   const [oidcForm, setOidcForm] = useState<OidcSettings>({
@@ -143,10 +147,12 @@ export default function SettingsPage() {
 
   useEffect(() => {
     void loadKeys();
-    void loadSystem();
     void loadUser();
-    void loadSettings();
-  }, [loadKeys, loadSystem, loadUser, loadSettings]);
+    if (isAdmin) {
+      void loadSystem();
+      void loadSettings();
+    }
+  }, [loadKeys, loadSystem, loadUser, loadSettings, isAdmin]);
 
   async function handleCreate() {
     if (!newKeyName.trim()) return;
@@ -319,433 +325,453 @@ export default function SettingsPage() {
   return (
     <div className="space-y-8 max-w-4xl">
       <header className="pb-4 border-b border-border">
-        <p className="eyebrow mb-2">SYSTEM · SETTINGS</p>
-        <h1 className="text-[28px] leading-none font-medium tracking-tight">Settings</h1>
+        <p className="eyebrow mb-2">{isAdmin ? 'SYSTEM · SETTINGS' : 'ACCOUNT · SETTINGS'}</p>
+        <h1 className="text-[28px] leading-none font-medium tracking-tight">
+          {isAdmin ? 'Platform & Account Settings' : 'Account Settings'}
+        </h1>
         <p className="text-muted-foreground mt-2 text-[13px]">
-          Single Sign-On (OIDC), API access, execution defaults, and infrastructure probes.
+          {isAdmin
+            ? 'Single Sign-On (OIDC), API access, execution defaults, and infrastructure probes.'
+            : 'Personal API access tokens and proxy password configuration.'}
         </p>
       </header>
 
-      {/* ===========================================
-          OIDC / SSO AUTHENTICATION & ROLE MAPPING
-          =========================================== */}
-      <section className="panel">
-        <header className="px-5 py-4 border-b border-border flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <KeyRound className="h-4 w-4 text-signal" />
-            <div>
-              <p className="eyebrow">AUTH · SSO &amp; OIDC</p>
-              <h2 className="text-[15px] mt-1">Generic OpenID Connect &amp; Role Mapping</h2>
-            </div>
-          </div>
-          <Badge
-            variant={oidcForm.enabled ? 'success' : 'outline'}
-            shape="chip"
-            className="px-2 font-mono text-[10px] tracking-wider uppercase"
-          >
-            {oidcForm.enabled ? 'enabled' : 'disabled'}
-          </Badge>
-        </header>
-
-        <div className="p-5 space-y-6">
-          {/* Toggle Switch */}
-          <div className="flex items-center justify-between p-3 rounded-sm border border-border bg-secondary/20">
-            <div>
-              <p className="text-[13px] font-medium text-foreground">Enable OIDC Single Sign-On</p>
-              <p className="text-[11px] text-muted-foreground mt-0.5">
-                Enables SSO login button on the login screen for Keycloak, Authentik, Okta, Google,
-                etc.
-              </p>
-            </div>
-            <label className="relative inline-flex items-center cursor-pointer">
-              <input
-                type="checkbox"
-                checked={oidcForm.enabled}
-                onChange={(e) => setOidcForm({ ...oidcForm, enabled: e.target.checked })}
-                className="sr-only peer"
-              />
-              <div className="w-10 h-5 bg-border peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-background peer-checked:after:bg-background after:border-border after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-signal"></div>
-            </label>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <Field
-              label="Provider Name"
-              hint="Display label for the login button (e.g. Keycloak, Google, SSO)"
-            >
-              <input
-                type="text"
-                value={oidcForm.providerName}
-                onChange={(e) => setOidcForm({ ...oidcForm, providerName: e.target.value })}
-                placeholder="Keycloak"
-                className={INPUT_CLASS}
-              />
-            </Field>
-
-            <Field label="OIDC Scopes" hint="Space-separated scopes requested from IdP">
-              <input
-                type="text"
-                value={oidcForm.scopes}
-                onChange={(e) => setOidcForm({ ...oidcForm, scopes: e.target.value })}
-                placeholder="openid email profile groups"
-                className={INPUT_CLASS}
-              />
-            </Field>
-          </div>
-
-          {/* Issuer URL & Live Test */}
-          <Field
-            label="OIDC Issuer URL"
-            hint="Base domain or discovery URL (e.g. https://src.adsdigitalpartner.co.id)"
-          >
-            <div className="flex gap-2">
-              <input
-                type="url"
-                value={oidcForm.issuerUrl}
-                onChange={(e) => {
-                  setOidcForm({ ...oidcForm, issuerUrl: e.target.value });
-                  setOidcTestResult(null);
-                }}
-                placeholder="https://src.adsdigitalpartner.co.id"
-                className={INPUT_CLASS}
-              />
-              <button
-                type="button"
-                onClick={() => void handleTestOidc()}
-                disabled={oidcTesting || !oidcForm.issuerUrl.trim()}
-                className="h-9 px-3 inline-flex items-center gap-1.5 text-[11px] font-mono uppercase tracking-wider border border-border rounded-sm text-foreground hover:bg-secondary/40 disabled:opacity-50 transition-colors whitespace-nowrap"
-              >
-                {oidcTesting ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin text-signal" />
-                ) : (
-                  <Globe className="h-3.5 w-3.5 text-signal" />
-                )}
-                test discovery
-              </button>
-            </div>
-          </Field>
-
-          {/* Test connection alert */}
-          {oidcTestResult && (
-            <div
-              className={cn(
-                'p-3 border rounded-sm text-[12px] flex items-start gap-2.5',
-                oidcTestResult.success
-                  ? 'border-signal/40 bg-signal/10 text-foreground'
-                  : 'border-fail/40 bg-fail/10 text-fail'
-              )}
-            >
-              {oidcTestResult.success ? (
-                <CheckCircle2 className="h-4 w-4 text-signal shrink-0 mt-0.5" />
-              ) : (
-                <AlertCircle className="h-4 w-4 text-fail shrink-0 mt-0.5" />
-              )}
-              <div className="min-w-0">
-                <p className="font-mono text-[10px] uppercase tracking-wider font-semibold">
-                  {oidcTestResult.success ? 'DISCOVERY VERIFIED' : 'DISCOVERY FAILED'}
-                </p>
-                <p className="mt-0.5">{oidcTestResult.message}</p>
+      {isAdmin && (
+        <>
+          {/* ===========================================
+              OIDC / SSO AUTHENTICATION & ROLE MAPPING
+              =========================================== */}
+          <section className="panel">
+            <header className="px-5 py-4 border-b border-border flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <KeyRound className="h-4 w-4 text-signal" />
+                <div>
+                  <p className="eyebrow">AUTH · SSO &amp; OIDC</p>
+                  <h2 className="text-[15px] mt-1">Generic OpenID Connect &amp; Role Mapping</h2>
+                </div>
               </div>
-            </div>
-          )}
+              <Badge
+                variant={oidcForm.enabled ? 'success' : 'outline'}
+                shape="chip"
+                className="px-2 font-mono text-[10px] tracking-wider uppercase"
+              >
+                {oidcForm.enabled ? 'enabled' : 'disabled'}
+              </Badge>
+            </header>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <Field label="Client ID" hint="Registered OIDC Client ID">
-              <input
-                type="text"
-                value={oidcForm.clientId}
-                onChange={(e) => setOidcForm({ ...oidcForm, clientId: e.target.value })}
-                placeholder="crawlee-cloud"
-                className={INPUT_CLASS}
-              />
-            </Field>
+            <div className="p-5 space-y-6">
+              {/* Toggle Switch */}
+              <div className="flex items-center justify-between p-3 rounded-sm border border-border bg-secondary/20">
+                <div>
+                  <p className="text-[13px] font-medium text-foreground">
+                    Enable OIDC Single Sign-On
+                  </p>
+                  <p className="text-[11px] text-muted-foreground mt-0.5">
+                    Enables SSO login button on the login screen for Keycloak, Authentik, Okta,
+                    Google, etc.
+                  </p>
+                </div>
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={oidcForm.enabled}
+                    onChange={(e) => setOidcForm({ ...oidcForm, enabled: e.target.checked })}
+                    className="sr-only peer"
+                  />
+                  <div className="w-10 h-5 bg-border peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-background peer-checked:after:bg-background after:border-border after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-signal"></div>
+                </label>
+              </div>
 
-            <Field label="Client Secret" hint="OAuth2 client secret key">
-              <div className="flex gap-2">
-                <input
-                  type={showOidcSecret ? 'text' : 'password'}
-                  value={oidcForm.clientSecret}
-                  onChange={(e) => setOidcForm({ ...oidcForm, clientSecret: e.target.value })}
-                  placeholder={oidcForm.isSecretSet ? '••••••••' : 'enter client secret'}
-                  className={INPUT_CLASS}
-                />
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <Field
+                  label="Provider Name"
+                  hint="Display label for the login button (e.g. Keycloak, Google, SSO)"
+                >
+                  <input
+                    type="text"
+                    value={oidcForm.providerName}
+                    onChange={(e) => setOidcForm({ ...oidcForm, providerName: e.target.value })}
+                    placeholder="Keycloak"
+                    className={INPUT_CLASS}
+                  />
+                </Field>
+
+                <Field label="OIDC Scopes" hint="Space-separated scopes requested from IdP">
+                  <input
+                    type="text"
+                    value={oidcForm.scopes}
+                    onChange={(e) => setOidcForm({ ...oidcForm, scopes: e.target.value })}
+                    placeholder="openid email profile groups"
+                    className={INPUT_CLASS}
+                  />
+                </Field>
+              </div>
+
+              {/* Issuer URL & Live Test */}
+              <Field
+                label="OIDC Issuer URL"
+                hint="Base domain or discovery URL (e.g. https://src.adsdigitalpartner.co.id)"
+              >
+                <div className="flex gap-2">
+                  <input
+                    type="url"
+                    value={oidcForm.issuerUrl}
+                    onChange={(e) => {
+                      setOidcForm({ ...oidcForm, issuerUrl: e.target.value });
+                      setOidcTestResult(null);
+                    }}
+                    placeholder="https://src.adsdigitalpartner.co.id"
+                    className={INPUT_CLASS}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void handleTestOidc()}
+                    disabled={oidcTesting || !oidcForm.issuerUrl.trim()}
+                    className="h-9 px-3 inline-flex items-center gap-1.5 text-[11px] font-mono uppercase tracking-wider border border-border rounded-sm text-foreground hover:bg-secondary/40 disabled:opacity-50 transition-colors whitespace-nowrap"
+                  >
+                    {oidcTesting ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin text-signal" />
+                    ) : (
+                      <Globe className="h-3.5 w-3.5 text-signal" />
+                    )}
+                    test discovery
+                  </button>
+                </div>
+              </Field>
+
+              {/* Test connection alert */}
+              {oidcTestResult && (
+                <div
+                  className={cn(
+                    'p-3 border rounded-sm text-[12px] flex items-start gap-2.5',
+                    oidcTestResult.success
+                      ? 'border-signal/40 bg-signal/10 text-foreground'
+                      : 'border-fail/40 bg-fail/10 text-fail'
+                  )}
+                >
+                  {oidcTestResult.success ? (
+                    <CheckCircle2 className="h-4 w-4 text-signal shrink-0 mt-0.5" />
+                  ) : (
+                    <AlertCircle className="h-4 w-4 text-fail shrink-0 mt-0.5" />
+                  )}
+                  <div className="min-w-0">
+                    <p className="font-mono text-[10px] uppercase tracking-wider font-semibold">
+                      {oidcTestResult.success ? 'DISCOVERY VERIFIED' : 'DISCOVERY FAILED'}
+                    </p>
+                    <p className="mt-0.5">{oidcTestResult.message}</p>
+                  </div>
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <Field label="Client ID" hint="Registered OIDC Client ID">
+                  <input
+                    type="text"
+                    value={oidcForm.clientId}
+                    onChange={(e) => setOidcForm({ ...oidcForm, clientId: e.target.value })}
+                    placeholder="crawlee-cloud"
+                    className={INPUT_CLASS}
+                  />
+                </Field>
+
+                <Field label="Client Secret" hint="OAuth2 client secret key">
+                  <div className="flex gap-2">
+                    <input
+                      type={showOidcSecret ? 'text' : 'password'}
+                      value={oidcForm.clientSecret}
+                      onChange={(e) => setOidcForm({ ...oidcForm, clientSecret: e.target.value })}
+                      placeholder={oidcForm.isSecretSet ? '••••••••' : 'enter client secret'}
+                      className={INPUT_CLASS}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowOidcSecret((s) => !s)}
+                      className="h-9 w-9 grid place-items-center border border-border rounded-sm text-muted-foreground hover:text-foreground"
+                    >
+                      {showOidcSecret ? (
+                        <EyeOff className="h-3.5 w-3.5" />
+                      ) : (
+                        <Eye className="h-3.5 w-3.5" />
+                      )}
+                    </button>
+                  </div>
+                </Field>
+              </div>
+
+              <Field
+                label="Redirect URI (Callback URL)"
+                hint="Set this URI in your OIDC Identity Provider client settings"
+              >
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={oidcForm.redirectUri || defaultRedirectUri}
+                    onChange={(e) => setOidcForm({ ...oidcForm, redirectUri: e.target.value })}
+                    placeholder={defaultRedirectUri}
+                    className={INPUT_CLASS}
+                  />
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void copy(oidcForm.redirectUri || defaultRedirectUri, 'Redirect URI')
+                    }
+                    className="h-9 w-9 grid place-items-center border border-border rounded-sm text-muted-foreground hover:text-foreground"
+                  >
+                    <Copy className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </Field>
+
+              {/* Role & Team Mapping Sub-section */}
+              <div className="pt-4 border-t border-border space-y-4">
+                <p className="eyebrow">ROLE &amp; TEAM MAPPING</p>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <Field
+                    label="Roles / Groups Claim Path"
+                    hint="Claim key in ID token/userinfo (e.g. roles, realm_access.roles, groups)"
+                  >
+                    <input
+                      type="text"
+                      value={oidcForm.rolesClaim}
+                      onChange={(e) => setOidcForm({ ...oidcForm, rolesClaim: e.target.value })}
+                      placeholder="realm_access.roles"
+                      className={INPUT_CLASS}
+                    />
+                  </Field>
+
+                  <Field
+                    label="Default Role for New Users"
+                    hint="Role assigned if user roles don't match Admin Roles"
+                  >
+                    <select
+                      value={oidcForm.defaultRole}
+                      onChange={(e) =>
+                        setOidcForm({
+                          ...oidcForm,
+                          defaultRole: e.target.value as 'admin' | 'user',
+                        })
+                      }
+                      className={cn(INPUT_CLASS, 'cursor-pointer')}
+                    >
+                      <option value="user">User (Standard Access)</option>
+                      <option value="admin">Admin (Full Console Access)</option>
+                    </select>
+                  </Field>
+                </div>
+
+                <Field
+                  label="Admin Roles / Teams (Comma-Separated)"
+                  hint="Users possessing any of these OIDC roles/groups will automatically receive 'admin' role"
+                >
+                  <input
+                    type="text"
+                    value={adminRolesInput}
+                    onChange={(e) => setAdminRolesInput(e.target.value)}
+                    placeholder="admin, crawlee-admins, DevOps, Platform-Team"
+                    className={INPUT_CLASS}
+                  />
+                  <div className="flex flex-wrap gap-1.5 mt-2">
+                    {adminRolesInput
+                      .split(',')
+                      .map((r) => r.trim())
+                      .filter(Boolean)
+                      .map((role) => (
+                        <Badge
+                          key={role}
+                          variant="outline"
+                          shape="chip"
+                          className="font-mono text-[10px] bg-secondary/30"
+                        >
+                          {role} → admin
+                        </Badge>
+                      ))}
+                  </div>
+                </Field>
+
+                <div className="flex items-center justify-between p-3 rounded-sm border border-border bg-secondary/10">
+                  <div>
+                    <p className="text-[13px] font-medium text-foreground">
+                      Auto-Register New Users
+                    </p>
+                    <p className="text-[11px] text-muted-foreground mt-0.5">
+                      Automatically create an account in the database on first successful SSO login.
+                    </p>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={oidcForm.autoRegister}
+                      onChange={(e) => setOidcForm({ ...oidcForm, autoRegister: e.target.checked })}
+                      className="sr-only peer"
+                    />
+                    <div className="w-10 h-5 bg-border peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-background peer-checked:after:bg-background after:border-border after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-signal"></div>
+                  </label>
+                </div>
+              </div>
+
+              <div className="pt-2 flex justify-end">
                 <button
                   type="button"
-                  onClick={() => setShowOidcSecret((s) => !s)}
-                  className="h-9 w-9 grid place-items-center border border-border rounded-sm text-muted-foreground hover:text-foreground"
+                  onClick={() => void handleSaveOidc()}
+                  disabled={oidcSaving}
+                  className="h-9 px-4 inline-flex items-center gap-2 text-[12px] font-mono uppercase tracking-wider bg-signal text-background hover:brightness-110 rounded-sm disabled:opacity-50 transition-colors"
                 >
-                  {showOidcSecret ? (
-                    <EyeOff className="h-3.5 w-3.5" />
+                  {oidcSaving ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
                   ) : (
-                    <Eye className="h-3.5 w-3.5" />
+                    <Save className="h-3.5 w-3.5" />
                   )}
+                  save oidc settings
                 </button>
               </div>
-            </Field>
-          </div>
-
-          <Field
-            label="Redirect URI (Callback URL)"
-            hint="Set this URI in your OIDC Identity Provider client settings"
-          >
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={oidcForm.redirectUri || defaultRedirectUri}
-                onChange={(e) => setOidcForm({ ...oidcForm, redirectUri: e.target.value })}
-                placeholder={defaultRedirectUri}
-                className={INPUT_CLASS}
-              />
-              <button
-                type="button"
-                onClick={() =>
-                  void copy(oidcForm.redirectUri || defaultRedirectUri, 'Redirect URI')
-                }
-                className="h-9 w-9 grid place-items-center border border-border rounded-sm text-muted-foreground hover:text-foreground"
-              >
-                <Copy className="h-3.5 w-3.5" />
-              </button>
             </div>
-          </Field>
+          </section>
 
-          {/* Role & Team Mapping Sub-section */}
-          <div className="pt-4 border-t border-border space-y-4">
-            <p className="eyebrow">ROLE &amp; TEAM MAPPING</p>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <Field
-                label="Roles / Groups Claim Path"
-                hint="Claim key in ID token/userinfo (e.g. roles, realm_access.roles, groups)"
-              >
-                <input
-                  type="text"
-                  value={oidcForm.rolesClaim}
-                  onChange={(e) => setOidcForm({ ...oidcForm, rolesClaim: e.target.value })}
-                  placeholder="realm_access.roles"
-                  className={INPUT_CLASS}
-                />
-              </Field>
-
-              <Field
-                label="Default Role for New Users"
-                hint="Role assigned if user roles don't match Admin Roles"
-              >
-                <select
-                  value={oidcForm.defaultRole}
-                  onChange={(e) =>
-                    setOidcForm({ ...oidcForm, defaultRole: e.target.value as 'admin' | 'user' })
-                  }
-                  className={cn(INPUT_CLASS, 'cursor-pointer')}
-                >
-                  <option value="user">User (Standard Access)</option>
-                  <option value="admin">Admin (Full Console Access)</option>
-                </select>
-              </Field>
-            </div>
-
-            <Field
-              label="Admin Roles / Teams (Comma-Separated)"
-              hint="Users possessing any of these OIDC roles/groups will automatically receive 'admin' role"
-            >
-              <input
-                type="text"
-                value={adminRolesInput}
-                onChange={(e) => setAdminRolesInput(e.target.value)}
-                placeholder="admin, crawlee-admins, DevOps, Platform-Team"
-                className={INPUT_CLASS}
-              />
-              <div className="flex flex-wrap gap-1.5 mt-2">
-                {adminRolesInput
-                  .split(',')
-                  .map((r) => r.trim())
-                  .filter(Boolean)
-                  .map((role) => (
-                    <Badge
-                      key={role}
-                      variant="outline"
-                      shape="chip"
-                      className="font-mono text-[10px] bg-secondary/30"
-                    >
-                      {role} → admin
-                    </Badge>
-                  ))}
-              </div>
-            </Field>
-
-            <div className="flex items-center justify-between p-3 rounded-sm border border-border bg-secondary/10">
-              <div>
-                <p className="text-[13px] font-medium text-foreground">Auto-Register New Users</p>
-                <p className="text-[11px] text-muted-foreground mt-0.5">
-                  Automatically create an account in the database on first successful SSO login.
-                </p>
-              </div>
-              <label className="relative inline-flex items-center cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={oidcForm.autoRegister}
-                  onChange={(e) => setOidcForm({ ...oidcForm, autoRegister: e.target.checked })}
-                  className="sr-only peer"
-                />
-                <div className="w-10 h-5 bg-border peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-background peer-checked:after:bg-background after:border-border after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-signal"></div>
-              </label>
-            </div>
-          </div>
-
-          <div className="pt-2 flex justify-end">
-            <button
-              type="button"
-              onClick={() => void handleSaveOidc()}
-              disabled={oidcSaving}
-              className="h-9 px-4 inline-flex items-center gap-2 text-[12px] font-mono uppercase tracking-wider bg-signal text-background hover:brightness-110 rounded-sm disabled:opacity-50 transition-colors"
-            >
-              {oidcSaving ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Save className="h-3.5 w-3.5" />
-              )}
-              save oidc settings
-            </button>
-          </div>
-        </div>
-      </section>
-
-      {/* ===========================================
+          {/* ===========================================
           EXECUTION DEFAULTS & LIMITS
           =========================================== */}
-      <section className="panel">
-        <header className="px-5 py-4 border-b border-border flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <Settings2 className="h-4 w-4 text-signal" />
-            <div>
-              <p className="eyebrow">SYSTEM · EXECUTION DEFAULTS</p>
-              <h2 className="text-[15px] mt-1">Runtime limits &amp; compute pricing</h2>
+          <section className="panel">
+            <header className="px-5 py-4 border-b border-border flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <Settings2 className="h-4 w-4 text-signal" />
+                <div>
+                  <p className="eyebrow">SYSTEM · EXECUTION DEFAULTS</p>
+                  <h2 className="text-[15px] mt-1">Runtime limits &amp; compute pricing</h2>
+                </div>
+              </div>
+            </header>
+
+            <div className="p-5 space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <Field
+                  label="Max Concurrent Runs"
+                  hint="Max simultaneous actor containers per runner"
+                >
+                  <input
+                    type="number"
+                    min="1"
+                    max="100"
+                    value={executionForm.maxConcurrentRuns}
+                    onChange={(e) =>
+                      setExecutionForm({
+                        ...executionForm,
+                        maxConcurrentRuns: parseInt(e.target.value, 10) || 1,
+                      })
+                    }
+                    className={INPUT_CLASS}
+                  />
+                </Field>
+
+                <Field label="Default Memory Limit (MB)" hint="Default container RAM allocation">
+                  <input
+                    type="number"
+                    min="128"
+                    step="128"
+                    value={executionForm.defaultMemoryMb}
+                    onChange={(e) =>
+                      setExecutionForm({
+                        ...executionForm,
+                        defaultMemoryMb: parseInt(e.target.value, 10) || 512,
+                      })
+                    }
+                    className={INPUT_CLASS}
+                  />
+                </Field>
+
+                <Field label="Default Timeout (Seconds)" hint="Hard execution limit per actor run">
+                  <input
+                    type="number"
+                    min="10"
+                    step="60"
+                    value={executionForm.defaultTimeoutSecs}
+                    onChange={(e) =>
+                      setExecutionForm({
+                        ...executionForm,
+                        defaultTimeoutSecs: parseInt(e.target.value, 10) || 60,
+                      })
+                    }
+                    className={INPUT_CLASS}
+                  />
+                </Field>
+
+                <Field label="Apify Compute Unit Price ($/CU)" hint="Used for run cost calculation">
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.05"
+                    value={executionForm.apifyCuPrice}
+                    onChange={(e) =>
+                      setExecutionForm({
+                        ...executionForm,
+                        apifyCuPrice: parseFloat(e.target.value) || 0,
+                      })
+                    }
+                    className={INPUT_CLASS}
+                  />
+                </Field>
+              </div>
+
+              <div className="pt-2 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => void handleSaveExecution()}
+                  disabled={executionSaving}
+                  className="h-9 px-4 inline-flex items-center gap-2 text-[12px] font-mono uppercase tracking-wider bg-signal text-background hover:brightness-110 rounded-sm disabled:opacity-50 transition-colors"
+                >
+                  {executionSaving ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Save className="h-3.5 w-3.5" />
+                  )}
+                  save execution defaults
+                </button>
+              </div>
             </div>
-          </div>
-        </header>
+          </section>
 
-        <div className="p-5 space-y-4">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <Field label="Max Concurrent Runs" hint="Max simultaneous actor containers per runner">
-              <input
-                type="number"
-                min="1"
-                max="100"
-                value={executionForm.maxConcurrentRuns}
-                onChange={(e) =>
-                  setExecutionForm({
-                    ...executionForm,
-                    maxConcurrentRuns: parseInt(e.target.value, 10) || 1,
-                  })
-                }
-                className={INPUT_CLASS}
-              />
-            </Field>
-
-            <Field label="Default Memory Limit (MB)" hint="Default container RAM allocation">
-              <input
-                type="number"
-                min="128"
-                step="128"
-                value={executionForm.defaultMemoryMb}
-                onChange={(e) =>
-                  setExecutionForm({
-                    ...executionForm,
-                    defaultMemoryMb: parseInt(e.target.value, 10) || 512,
-                  })
-                }
-                className={INPUT_CLASS}
-              />
-            </Field>
-
-            <Field label="Default Timeout (Seconds)" hint="Hard execution limit per actor run">
-              <input
-                type="number"
-                min="10"
-                step="60"
-                value={executionForm.defaultTimeoutSecs}
-                onChange={(e) =>
-                  setExecutionForm({
-                    ...executionForm,
-                    defaultTimeoutSecs: parseInt(e.target.value, 10) || 60,
-                  })
-                }
-                className={INPUT_CLASS}
-              />
-            </Field>
-
-            <Field label="Apify Compute Unit Price ($/CU)" hint="Used for run cost calculation">
-              <input
-                type="number"
-                min="0"
-                step="0.05"
-                value={executionForm.apifyCuPrice}
-                onChange={(e) =>
-                  setExecutionForm({
-                    ...executionForm,
-                    apifyCuPrice: parseFloat(e.target.value) || 0,
-                  })
-                }
-                className={INPUT_CLASS}
-              />
-            </Field>
-          </div>
-
-          <div className="pt-2 flex justify-end">
-            <button
-              type="button"
-              onClick={() => void handleSaveExecution()}
-              disabled={executionSaving}
-              className="h-9 px-4 inline-flex items-center gap-2 text-[12px] font-mono uppercase tracking-wider bg-signal text-background hover:brightness-110 rounded-sm disabled:opacity-50 transition-colors"
-            >
-              {executionSaving ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Save className="h-3.5 w-3.5" />
-              )}
-              save execution defaults
-            </button>
-          </div>
-        </div>
-      </section>
-
-      {/* ===========================================
+          {/* ===========================================
           SERVER & INFRASTRUCTURE STATE
           =========================================== */}
-      <section className="panel">
-        <header className="px-5 py-4 border-b border-border flex items-center gap-3">
-          <Server className="h-4 w-4 text-signal" />
-          <div>
-            <p className="eyebrow">SYSTEM · SERVER</p>
-            <h2 className="text-[15px] mt-1">Live state from the API process</h2>
-          </div>
-        </header>
-        {systemError ? (
-          <div className="px-5 py-3 text-[12px] text-fail flex items-center gap-2">
-            <AlertCircle className="h-3.5 w-3.5" />
-            <span>Failed to load: {systemError}</span>
-          </div>
-        ) : !systemInfo ? (
-          <p className="px-5 py-3 text-[12px] text-muted-foreground font-mono">[ loading · · · ]</p>
-        ) : (
-          <dl className="grid grid-cols-2 md:grid-cols-4 gap-x-4 gap-y-2 px-5 py-4 text-[12px]">
-            <ServerStat label="version" value={`v${systemInfo.version}`} />
-            <ServerStat label="node" value={systemInfo.nodeVersion} />
-            <ServerStat
-              label="scaler"
-              value={
-                systemInfo.scaler.enabled
-                  ? `${systemInfo.scaler.provider} · ${systemInfo.scaler.minRunners}–${systemInfo.scaler.maxRunners}`
-                  : 'disabled'
-              }
-              tone={systemInfo.scaler.enabled ? 'signal' : 'muted'}
-            />
-            <ServerStat
-              label="queue"
-              value={`max ${systemInfo.executionDefaults.maxConcurrentRuns} concurrent`}
-            />
-          </dl>
-        )}
-      </section>
+          <section className="panel">
+            <header className="px-5 py-4 border-b border-border flex items-center gap-3">
+              <Server className="h-4 w-4 text-signal" />
+              <div>
+                <p className="eyebrow">SYSTEM · SERVER</p>
+                <h2 className="text-[15px] mt-1">Live state from the API process</h2>
+              </div>
+            </header>
+            {systemError ? (
+              <div className="px-5 py-3 text-[12px] text-fail flex items-center gap-2">
+                <AlertCircle className="h-3.5 w-3.5" />
+                <span>Failed to load: {systemError}</span>
+              </div>
+            ) : !systemInfo ? (
+              <p className="px-5 py-3 text-[12px] text-muted-foreground font-mono">
+                [ loading · · · ]
+              </p>
+            ) : (
+              <dl className="grid grid-cols-2 md:grid-cols-4 gap-x-4 gap-y-2 px-5 py-4 text-[12px]">
+                <ServerStat label="version" value={`v${systemInfo.version}`} />
+                <ServerStat label="node" value={systemInfo.nodeVersion} />
+                <ServerStat
+                  label="scaler"
+                  value={
+                    systemInfo.scaler.enabled
+                      ? `${systemInfo.scaler.provider} · ${systemInfo.scaler.minRunners}–${systemInfo.scaler.maxRunners}`
+                      : 'disabled'
+                  }
+                  tone={systemInfo.scaler.enabled ? 'signal' : 'muted'}
+                />
+                <ServerStat
+                  label="queue"
+                  value={`max ${systemInfo.executionDefaults.maxConcurrentRuns} concurrent`}
+                />
+              </dl>
+            )}
+          </section>
+        </>
+      )}
 
       {/* ===========================================
           API ACCESS TOKENS

@@ -25,6 +25,7 @@ import { APP_VERSION } from '@/lib/constants';
 import { cn } from '@/lib/utils';
 import type { LucideIcon } from 'lucide-react';
 import { WorkspaceSwitcher } from '@/components/workspace-switcher';
+import { useAuth } from '@/lib/auth';
 
 type Item = { href: string; label: string; icon: LucideIcon; soon?: boolean };
 type Group = { id: string; label: string; items: Item[] };
@@ -127,6 +128,8 @@ export function BrandStrip() {
   `onNavigate` lets the mobile drawer close itself when a link is clicked.
 */
 export function NavContents({ onNavigate }: { onNavigate?: () => void }) {
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
   const rawPathname = usePathname();
   const pathname =
     ROUTE_PREFIX && rawPathname.startsWith(ROUTE_PREFIX)
@@ -135,73 +138,84 @@ export function NavContents({ onNavigate }: { onNavigate?: () => void }) {
 
   return (
     <nav className="flex-1 overflow-y-auto py-4">
-      {navGroups.map((group) => (
-        <div key={group.id} className="mb-5 px-3">
-          <div className="px-2 mb-1.5 flex items-center gap-2">
-            <span className="eyebrow">{group.label}</span>
-            <span className="flex-1 h-px bg-border" />
-          </div>
-          <ul className="space-y-px">
-            {group.items.map((item) => {
-              const isActive =
-                !item.soon &&
-                (pathname === item.href || (item.href !== '/' && pathname.startsWith(item.href)));
-              const Icon = item.icon;
-              const baseRow =
-                'group flex items-center gap-2.5 px-2 py-1.5 text-[13px] rounded-sm transition-colors relative';
+      {navGroups
+        .map((group) => ({
+          ...group,
+          items: group.items.filter((item) => {
+            if ((item.href === '/runners' || item.href === '/retention') && !isAdmin) {
+              return false;
+            }
+            return true;
+          }),
+        }))
+        .filter((group) => group.items.length > 0)
+        .map((group) => (
+          <div key={group.id} className="mb-5 px-3">
+            <div className="px-2 mb-1.5 flex items-center gap-2">
+              <span className="eyebrow">{group.label}</span>
+              <span className="flex-1 h-px bg-border" />
+            </div>
+            <ul className="space-y-px">
+              {group.items.map((item) => {
+                const isActive =
+                  !item.soon &&
+                  (pathname === item.href || (item.href !== '/' && pathname.startsWith(item.href)));
+                const Icon = item.icon;
+                const baseRow =
+                  'group flex items-center gap-2.5 px-2 py-1.5 text-[13px] rounded-sm transition-colors relative';
 
-              if (item.soon) {
+                if (item.soon) {
+                  return (
+                    <li key={item.href}>
+                      <span
+                        aria-disabled="true"
+                        className={cn(
+                          baseRow,
+                          'text-muted-foreground/70 cursor-not-allowed select-none'
+                        )}
+                        title="Coming soon"
+                      >
+                        <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
+                        <span className="flex-1">{item.label}</span>
+                        <span className="font-mono text-[9px] tracking-wider text-muted-foreground/70 border border-border px-1 rounded-sm">
+                          SOON
+                        </span>
+                      </span>
+                    </li>
+                  );
+                }
+
                 return (
                   <li key={item.href}>
-                    <span
-                      aria-disabled="true"
+                    <AppLink
+                      href={item.href}
+                      onClick={onNavigate}
                       className={cn(
                         baseRow,
-                        'text-muted-foreground/70 cursor-not-allowed select-none'
+                        isActive
+                          ? 'text-foreground bg-signal/5'
+                          : 'text-muted-foreground hover:text-foreground hover:bg-secondary/60'
                       )}
-                      title="Coming soon"
                     >
-                      <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
+                      {isActive && (
+                        <span className="absolute left-0 top-1/2 -translate-y-1/2 w-[2px] h-3.5 bg-signal" />
+                      )}
+                      <Icon
+                        className={cn(
+                          'h-3.5 w-3.5 shrink-0',
+                          isActive
+                            ? 'text-signal'
+                            : 'text-muted-foreground group-hover:text-foreground'
+                        )}
+                      />
                       <span className="flex-1">{item.label}</span>
-                      <span className="font-mono text-[9px] tracking-wider text-muted-foreground/70 border border-border px-1 rounded-sm">
-                        SOON
-                      </span>
-                    </span>
+                    </AppLink>
                   </li>
                 );
-              }
-
-              return (
-                <li key={item.href}>
-                  <AppLink
-                    href={item.href}
-                    onClick={onNavigate}
-                    className={cn(
-                      baseRow,
-                      isActive
-                        ? 'text-foreground bg-signal/5'
-                        : 'text-muted-foreground hover:text-foreground hover:bg-secondary/60'
-                    )}
-                  >
-                    {isActive && (
-                      <span className="absolute left-0 top-1/2 -translate-y-1/2 w-[2px] h-3.5 bg-signal" />
-                    )}
-                    <Icon
-                      className={cn(
-                        'h-3.5 w-3.5 shrink-0',
-                        isActive
-                          ? 'text-signal'
-                          : 'text-muted-foreground group-hover:text-foreground'
-                      )}
-                    />
-                    <span className="flex-1">{item.label}</span>
-                  </AppLink>
-                </li>
-              );
-            })}
-          </ul>
-        </div>
-      ))}
+              })}
+            </ul>
+          </div>
+        ))}
     </nav>
   );
 }
@@ -210,16 +224,35 @@ export function NavContents({ onNavigate }: { onNavigate?: () => void }) {
   Operator footer — identity card with sign-out.
 */
 export function OperatorFooter() {
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
+  const displayName = user?.name || user?.email?.split('@')[0] || 'User';
+  const initial = (user?.email || 'U').slice(0, 2).toUpperCase();
+
   return (
     <div className="border-t border-border px-3 py-3 shrink-0">
       <div className="flex items-center gap-2.5 px-2 py-2 bg-secondary/40 border border-border rounded-sm">
         <div className="h-7 w-7 rounded-sm bg-signal/10 border border-signal/40 grid place-items-center">
-          <span className="font-mono text-[10px] text-signal">OP</span>
+          <span className="font-mono text-[10px] text-signal font-bold">{initial}</span>
         </div>
         <div className="flex-1 min-w-0">
-          <p className="text-[12px] text-foreground truncate leading-tight">Operator</p>
-          <p className="text-[10px] text-muted-foreground font-mono leading-tight flex items-center gap-1.5 mt-0.5">
-            <span className="live-dot" /> self-hosted
+          <div className="flex items-center gap-1.5 min-w-0">
+            <p className="text-[12px] text-foreground truncate leading-tight font-medium">
+              {displayName}
+            </p>
+            <span
+              className={cn(
+                'text-[8px] font-mono uppercase px-1 py-0.5 rounded-xs border leading-none shrink-0',
+                isAdmin
+                  ? 'bg-signal/15 text-signal border-signal/30 font-bold'
+                  : 'bg-secondary text-muted-foreground border-border'
+              )}
+            >
+              {user?.role || 'user'}
+            </span>
+          </div>
+          <p className="text-[10px] text-muted-foreground font-mono leading-tight truncate mt-0.5">
+            {user?.email || 'self-hosted'}
           </p>
         </div>
         <button
@@ -232,6 +265,7 @@ export function OperatorFooter() {
             window.location.href = prefixPath('/login');
           }}
           className="text-muted-foreground hover:text-fail transition-colors p-1"
+          title="Sign out"
         >
           <LogOut className="h-3.5 w-3.5" />
         </button>
