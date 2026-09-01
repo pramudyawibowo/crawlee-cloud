@@ -135,9 +135,17 @@ function envCron(key: string, defaultValue: string): string {
   return v;
 }
 
+function parseLogLevel(raw?: string): string {
+  if (!raw) return 'info';
+  const clean = raw.toLowerCase().trim();
+  if (clean === 'warning') return 'warn';
+  const valid = ['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'];
+  return valid.includes(clean) ? clean : 'info';
+}
+
 export const config: Config = {
   port: envInt('PORT', 3000),
-  logLevel: process.env.LOG_LEVEL ?? 'info',
+  logLevel: parseLogLevel(process.env.LOG_LEVEL),
   nodeEnv: env('NODE_ENV', 'development'),
 
   // Database - no default password in production
