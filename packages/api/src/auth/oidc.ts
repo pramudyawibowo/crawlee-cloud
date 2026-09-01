@@ -8,7 +8,6 @@
 import { randomBytes } from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import { nanoid } from 'nanoid';
-import { config } from '../config.js';
 import { pool } from '../db/index.js';
 import { redis } from '../storage/redis.js';
 
@@ -44,48 +43,86 @@ export interface OidcStateData {
   createdAt: number;
 }
 
+import { getEffectiveOidcConfig } from '../storage/settings.js';
+
 // In-memory cache for OIDC provider discovery metadata
-let cachedDiscovery: { config: OidcConfiguration; fetchedAt: number } | null = null;
+let cachedDiscovery: { config: OidcConfiguration; issuerUrl: string; fetchedAt: number } | null =
+  null;
 const DISCOVERY_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 // In-memory state store fallback if Redis is temporarily unavailable
 const inMemoryStates = new Map<string, { data: OidcStateData; expiresAt: number }>();
 
 /**
+ * Test connectivity to an OIDC issuer's discovery document.
+ */
+export async function testOidcDiscovery(issuerUrl: string): Promise<{
+  success: boolean;
+  config?: OidcConfiguration;
+  error?: string;
+}> {
+  if (!issuerUrl || !issuerUrl.trim()) {
+    return { success: false, error: 'Issuer URL is required' };
+  }
+
+  try {
+    const issuerBase = issuerUrl.trim().replace(/\/+$/, '');
+    const discoveryUrl = `${issuerBase}/.well-known/openid-configuration`;
+
+    const res = await fetch(discoveryUrl, {
+      headers: { Accept: 'application/json' },
+    });
+
+    if (!res.ok) {
+      return {
+        success: false,
+        error: `Discovery request failed with HTTP ${res.status} (${res.statusText})`,
+      };
+    }
+
+    const data = (await res.json()) as OidcConfiguration;
+    if (!data.authorization_endpoint || !data.token_endpoint) {
+      return {
+        success: false,
+        error: 'Discovery endpoint returned invalid JSON (missing authorization or token endpoint)',
+      };
+    }
+
+    return { success: true, config: data };
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'Failed to reach OIDC discovery endpoint',
+    };
+  }
+}
+
+/**
  * Fetch and cache the OIDC discovery document (.well-known/openid-configuration).
  */
 export async function getOidcConfiguration(): Promise<OidcConfiguration> {
-  if (!config.oidcIssuerUrl) {
-    throw new Error('OIDC is not properly configured: OIDC_ISSUER_URL is missing');
+  const oidcSettings = await getEffectiveOidcConfig();
+  if (!oidcSettings.issuerUrl) {
+    throw new Error('OIDC is not properly configured: Issuer URL is missing');
   }
 
+  const issuerBase = oidcSettings.issuerUrl.replace(/\/+$/, '');
   const now = Date.now();
-  if (cachedDiscovery && now - cachedDiscovery.fetchedAt < DISCOVERY_CACHE_TTL_MS) {
+  if (
+    cachedDiscovery &&
+    cachedDiscovery.issuerUrl === issuerBase &&
+    now - cachedDiscovery.fetchedAt < DISCOVERY_CACHE_TTL_MS
+  ) {
     return cachedDiscovery.config;
   }
 
-  const issuerBase = config.oidcIssuerUrl.replace(/\/+$/, '');
-  const discoveryUrl = `${issuerBase}/.well-known/openid-configuration`;
-
-  const res = await fetch(discoveryUrl, {
-    headers: { Accept: 'application/json' },
-  });
-
-  if (!res.ok) {
-    throw new Error(
-      `Failed to fetch OIDC discovery document from ${discoveryUrl}: HTTP ${res.status}`
-    );
+  const testResult = await testOidcDiscovery(issuerBase);
+  if (!testResult.success || !testResult.config) {
+    throw new Error(testResult.error || 'Failed to fetch OIDC discovery document');
   }
 
-  const data = (await res.json()) as OidcConfiguration;
-  if (!data.authorization_endpoint || !data.token_endpoint) {
-    throw new Error(
-      `Invalid OIDC discovery response from ${discoveryUrl}: missing authorization or token endpoint`
-    );
-  }
-
-  cachedDiscovery = { config: data, fetchedAt: now };
-  return data;
+  cachedDiscovery = { config: testResult.config, issuerUrl: issuerBase, fetchedAt: now };
+  return testResult.config;
 }
 
 /**
@@ -158,20 +195,21 @@ export async function getOidcAuthorizationUrl(options: {
   returnTo?: string;
   customScopes?: string;
 }): Promise<{ url: string; state: string; nonce: string }> {
+  const oidcSettings = await getEffectiveOidcConfig();
   const oidcConfig = await getOidcConfiguration();
-  const redirectUri = options.redirectUri || config.oidcRedirectUri || '';
+  const redirectUri = options.redirectUri || oidcSettings.redirectUri || '';
 
-  if (!config.oidcClientId) {
-    throw new Error('OIDC_CLIENT_ID is not configured');
+  if (!oidcSettings.clientId) {
+    throw new Error('OIDC Client ID is not configured');
   }
 
   const { state, nonce } = await createOidcState(redirectUri, options.returnTo);
 
   const params = new URLSearchParams({
     response_type: 'code',
-    client_id: config.oidcClientId,
+    client_id: oidcSettings.clientId,
     redirect_uri: redirectUri,
-    scope: options.customScopes || config.oidcScopes,
+    scope: options.customScopes || oidcSettings.scopes || 'openid email profile groups',
     state,
     nonce,
   });
@@ -184,18 +222,19 @@ export async function getOidcAuthorizationUrl(options: {
  * Exchange an authorization code for OIDC tokens.
  */
 export async function exchangeOidcCode(code: string, redirectUri: string): Promise<OidcTokens> {
+  const oidcSettings = await getEffectiveOidcConfig();
   const oidcConfig = await getOidcConfiguration();
 
-  if (!config.oidcClientId || !config.oidcClientSecret) {
-    throw new Error('OIDC client credentials (OIDC_CLIENT_ID, OIDC_CLIENT_SECRET) are missing');
+  if (!oidcSettings.clientId || !oidcSettings.clientSecret) {
+    throw new Error('OIDC client credentials (Client ID, Client Secret) are missing');
   }
 
   const bodyParams = new URLSearchParams({
     grant_type: 'authorization_code',
     code,
     redirect_uri: redirectUri,
-    client_id: config.oidcClientId,
-    client_secret: config.oidcClientSecret,
+    client_id: oidcSettings.clientId,
+    client_secret: oidcSettings.clientSecret,
   });
 
   const headers: Record<string, string> = {
@@ -204,7 +243,7 @@ export async function exchangeOidcCode(code: string, redirectUri: string): Promi
   };
 
   // Basic Auth header support for IdPs that require client authentication in headers
-  const basicAuth = Buffer.from(`${config.oidcClientId}:${config.oidcClientSecret}`).toString(
+  const basicAuth = Buffer.from(`${oidcSettings.clientId}:${oidcSettings.clientSecret}`).toString(
     'base64'
   );
   headers['Authorization'] = `Basic ${basicAuth}`;
@@ -388,7 +427,8 @@ export async function findOrCreateOidcUser(
   }
 
   // 2. User not found -> Auto-register if enabled
-  if (!config.oidcAutoRegister) {
+  const oidcSettings = await getEffectiveOidcConfig();
+  if (!oidcSettings.autoRegister) {
     throw new Error('User does not exist and automatic registration is disabled');
   }
 

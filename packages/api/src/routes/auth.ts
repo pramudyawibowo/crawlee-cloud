@@ -23,7 +23,6 @@ import {
 import { authenticate } from '../auth/middleware.js';
 import { invalidateApiKey } from '../auth/api-key-cache.js';
 
-import { config } from '../config.js';
 import {
   getOidcAuthorizationUrl,
   consumeOidcState,
@@ -33,6 +32,8 @@ import {
   mapOidcRolesToRole,
   findOrCreateOidcUser,
 } from '../auth/oidc.js';
+
+import { getEffectiveOidcConfig } from '../storage/settings.js';
 
 const loginSchema = z.object({
   email: z.string().email(),
@@ -51,12 +52,13 @@ export async function authRoutes(app: FastifyInstance) {
    * List available authentication providers.
    */
   app.get('/v2/auth/providers', async (_request, reply) => {
+    const oidcSettings = await getEffectiveOidcConfig();
     return reply.send({
       data: {
         password: true,
         oidc: {
-          enabled: config.oidcEnabled,
-          name: config.oidcProviderName,
+          enabled: oidcSettings.enabled,
+          name: oidcSettings.providerName || 'SSO',
           loginUrl: '/v2/auth/oidc/login',
         },
       },
@@ -67,7 +69,8 @@ export async function authRoutes(app: FastifyInstance) {
    * Initiate generic OIDC login flow.
    */
   app.get('/v2/auth/oidc/login', async (request, reply) => {
-    if (!config.oidcEnabled) {
+    const oidcSettings = await getEffectiveOidcConfig();
+    if (!oidcSettings.enabled) {
       return reply.status(404).send({ error: { message: 'OIDC authentication is not enabled' } });
     }
 
@@ -77,7 +80,7 @@ export async function authRoutes(app: FastifyInstance) {
       (request.headers['x-forwarded-proto'] as string) ||
       (request.protocol.startsWith('https') ? 'https' : 'http');
     const defaultRedirectUri = `${proto}://${host}/v2/auth/oidc/callback`;
-    const redirectUri = config.oidcRedirectUri || defaultRedirectUri;
+    const redirectUri = oidcSettings.redirectUri || defaultRedirectUri;
 
     const query = request.query as { return_to?: string } | undefined;
     const returnTo = query?.return_to;
@@ -100,7 +103,8 @@ export async function authRoutes(app: FastifyInstance) {
    * OIDC callback handler.
    */
   app.get('/v2/auth/oidc/callback', async (request, reply) => {
-    if (!config.oidcEnabled) {
+    const oidcSettings = await getEffectiveOidcConfig();
+    if (!oidcSettings.enabled) {
       return reply.status(404).send({ error: { message: 'OIDC authentication is not enabled' } });
     }
 
@@ -140,11 +144,11 @@ export async function authRoutes(app: FastifyInstance) {
       const profile = await fetchOidcUserProfile(tokens);
 
       // 3. Extract and map roles
-      const userRoles = extractRolesFromClaims(profile.rawClaims, config.oidcRolesClaim);
+      const userRoles = extractRolesFromClaims(profile.rawClaims, oidcSettings.rolesClaim);
       const computedRole = mapOidcRolesToRole(
         userRoles,
-        config.oidcAdminRoles,
-        config.oidcDefaultRole
+        oidcSettings.adminRoles,
+        oidcSettings.defaultRole
       );
 
       // 4. Auto-register or synchronize user

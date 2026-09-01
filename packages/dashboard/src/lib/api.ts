@@ -1273,3 +1273,71 @@ export async function testWebhook(id: string, eventType?: string): Promise<Webho
   });
   return res.data;
 }
+
+export interface OidcSettings {
+  enabled: boolean;
+  providerName: string;
+  issuerUrl: string;
+  clientId: string;
+  clientSecret: string;
+  isSecretSet?: boolean;
+  scopes: string;
+  redirectUri?: string;
+  rolesClaim: string;
+  adminRoles: string[];
+  defaultRole: 'admin' | 'user';
+  autoRegister: boolean;
+}
+
+export interface ExecutionSettings {
+  maxConcurrentRuns: number;
+  defaultMemoryMb: number;
+  defaultTimeoutSecs: number;
+  apifyCuPrice: number;
+}
+
+export interface SystemSettings {
+  oidc: OidcSettings;
+  execution: ExecutionSettings;
+}
+
+export async function getSystemSettings(): Promise<SystemSettings> {
+  const res = await fetchApi<{ data: SystemSettings }>('/v2/system/settings');
+  return res.data;
+}
+
+export async function updateOidcSettings(payload: Partial<OidcSettings>): Promise<OidcSettings> {
+  const res = await fetchApi<{ data: OidcSettings }>('/v2/system/settings/oidc', {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+  return res.data;
+}
+
+export async function testOidcConnection(issuerUrl: string): Promise<{
+  success: boolean;
+  endpoints?: Record<string, string>;
+  error?: string;
+}> {
+  const res = await fetchApi<{
+    data: {
+      success: boolean;
+      endpoints?: Record<string, string>;
+      error?: string;
+    };
+  }>('/v2/system/settings/oidc/test', {
+    method: 'POST',
+    body: JSON.stringify({ issuerUrl }),
+  });
+  return res.data;
+}
+
+export async function updateExecutionSettings(
+  payload: Partial<ExecutionSettings>
+): Promise<ExecutionSettings> {
+  const res = await fetchApi<{ data: ExecutionSettings }>('/v2/system/settings/execution', {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+  return res.data;
+}

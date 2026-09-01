@@ -417,6 +417,14 @@ CREATE INDEX IF NOT EXISTS idx_users_oidc_sub ON users(auth_provider, oidc_sub) 
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS key_sha256 TEXT;
 CREATE INDEX IF NOT EXISTS idx_api_keys_sha256
   ON api_keys(key_sha256) WHERE is_active = TRUE;
+
+-- Dynamic System Settings
+CREATE TABLE IF NOT EXISTS system_settings (
+  key TEXT PRIMARY KEY,
+  value JSONB NOT NULL,
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_by VARCHAR(21) REFERENCES users(id) ON DELETE SET NULL
+);
 `;
 
 export async function migrate(): Promise<void> {
