@@ -1,9 +1,10 @@
-"use client";
+'use client';
 
-import { useEffect, useRef, useState } from "react";
-import { ScrollText, Play, Pause, Download, Trash2 } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
+import { useEffect, useRef, useState } from 'react';
+import { ScrollText, Play, Pause, Download, Trash2 } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { getApiUrl } from '@/lib/api';
 
 interface LogEntry {
   timestamp: string;
@@ -26,17 +27,17 @@ export function LogViewer({ runId, token }: LogViewerProps) {
 
   useEffect(() => {
     if (!isStreaming) return;
-    
-    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
-    const wsUrl = apiUrl.replace('http', 'ws');
-    
+
+    const apiUrl = getApiUrl();
+    const wsUrl = apiUrl.replace(/^http/, 'ws');
+
     const ws = new WebSocket(`${wsUrl}/v2/actor-runs/${runId}/logs/stream?token=${token}`);
     wsRef.current = ws;
-    
+
     ws.onopen = () => {
       setIsConnected(true);
     };
-    
+
     ws.onmessage = (event) => {
       try {
         const log = JSON.parse(event.data);
@@ -44,7 +45,7 @@ export function LogViewer({ runId, token }: LogViewerProps) {
           console.error('WebSocket error:', log.error);
           return;
         }
-        setLogs(prev => [...prev, log]);
+        setLogs((prev) => [...prev, log]);
         if (autoScrollRef.current && scrollRef.current) {
           scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
         }
@@ -52,16 +53,16 @@ export function LogViewer({ runId, token }: LogViewerProps) {
         console.error('Failed to parse log:', e);
       }
     };
-    
+
     ws.onclose = () => {
       setIsConnected(false);
     };
-    
+
     ws.onerror = (error) => {
       console.error('WebSocket error:', error);
       setIsConnected(false);
     };
-    
+
     return () => {
       ws.close();
     };
@@ -85,7 +86,7 @@ export function LogViewer({ runId, token }: LogViewerProps) {
   }
 
   function downloadLogs() {
-    const content = logs.map(l => `[${l.timestamp}] [${l.level}] ${l.message}`).join('\n');
+    const content = logs.map((l) => `[${l.timestamp}] [${l.level}] ${l.message}`).join('\n');
     const blob = new Blob([content], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -97,11 +98,16 @@ export function LogViewer({ runId, token }: LogViewerProps) {
 
   function getLevelColor(level: string) {
     switch (level.toUpperCase()) {
-      case 'ERROR': return 'text-red-500';
-      case 'WARN': return 'text-yellow-500';
-      case 'INFO': return 'text-blue-500';
-      case 'DEBUG': return 'text-gray-500';
-      default: return 'text-foreground';
+      case 'ERROR':
+        return 'text-red-500';
+      case 'WARN':
+        return 'text-yellow-500';
+      case 'INFO':
+        return 'text-blue-500';
+      case 'DEBUG':
+        return 'text-gray-500';
+      default:
+        return 'text-foreground';
     }
   }
 
@@ -111,12 +117,17 @@ export function LogViewer({ runId, token }: LogViewerProps) {
         <div className="flex items-center gap-2">
           <ScrollText className="h-4 w-4 text-muted-foreground" />
           <span className="font-medium text-sm">Logs</span>
-          <Badge variant={isConnected ? "success" : "outline"} className="text-xs">
-            {isConnected ? "Live" : "Disconnected"}
+          <Badge variant={isConnected ? 'success' : 'outline'} className="text-xs">
+            {isConnected ? 'Live' : 'Disconnected'}
           </Badge>
         </div>
         <div className="flex items-center gap-1">
-          <Button variant="ghost" size="icon" onClick={toggleStreaming} title={isStreaming ? "Pause" : "Resume"}>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={toggleStreaming}
+            title={isStreaming ? 'Pause' : 'Resume'}
+          >
             {isStreaming ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
           </Button>
           <Button variant="ghost" size="icon" onClick={downloadLogs} title="Download">
@@ -127,28 +138,22 @@ export function LogViewer({ runId, token }: LogViewerProps) {
           </Button>
         </div>
       </div>
-      
-      <div 
-        ref={scrollRef} 
+
+      <div
+        ref={scrollRef}
         onScroll={handleScroll}
         className="flex-1 overflow-auto bg-zinc-950 font-mono text-xs p-3"
       >
         {logs.length === 0 ? (
-          <div className="text-muted-foreground text-center py-8">
-            Waiting for logs...
-          </div>
+          <div className="text-muted-foreground text-center py-8">Waiting for logs...</div>
         ) : (
           logs.map((log, i) => (
             <div key={i} className="flex gap-2 py-0.5 hover:bg-zinc-900/50">
               <span className="text-muted-foreground shrink-0">
                 {new Date(log.timestamp).toLocaleTimeString()}
               </span>
-              <span className={`shrink-0 w-12 ${getLevelColor(log.level)}`}>
-                [{log.level}]
-              </span>
-              <span className="text-zinc-100 break-all">
-                {log.message}
-              </span>
+              <span className={`shrink-0 w-12 ${getLevelColor(log.level)}`}>[{log.level}]</span>
+              <span className="text-zinc-100 break-all">{log.message}</span>
             </div>
           ))
         )}

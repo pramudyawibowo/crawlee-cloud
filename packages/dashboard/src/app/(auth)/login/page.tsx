@@ -5,6 +5,7 @@ import Image from 'next/image';
 import { Loader2, LogIn, ShieldAlert } from 'lucide-react';
 import { APP_VERSION } from '@/lib/constants';
 import { prefixPath } from '@/lib/path-prefix';
+import { getApiUrl } from '@/lib/api';
 
 export default function LoginPage() {
   const [email, setEmail] = useState('');
@@ -17,7 +18,7 @@ export default function LoginPage() {
     setError('');
     setLoading(true);
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
+      const apiUrl = getApiUrl();
       const res = await fetch(`${apiUrl}/v2/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

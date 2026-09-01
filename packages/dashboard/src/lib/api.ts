@@ -4,7 +4,12 @@
  * Handles authenticated requests to the backend API.
  */
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
+export function getApiUrl(): string {
+  if (typeof window !== 'undefined' && (window as any).__ENV__?.NEXT_PUBLIC_API_URL) {
+    return (window as any).__ENV__.NEXT_PUBLIC_API_URL;
+  }
+  return process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
+}
 
 /**
  * Apify-shaped pagination envelope. The API's list endpoints return this
@@ -335,7 +340,7 @@ export async function openInTabAsBlob(
   const placeholder = window.open('about:blank', '_blank');
   try {
     const token = getToken();
-    const res = await fetch(`${API_URL}${endpoint}`, {
+    const res = await fetch(`${getApiUrl()}${endpoint}`, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -385,7 +390,7 @@ export async function openInTabAsBlob(
  */
 export async function downloadAsBlob(endpoint: string, filename: string): Promise<void> {
   const token = getToken();
-  const res = await fetch(`${API_URL}${endpoint}`, {
+  const res = await fetch(`${getApiUrl()}${endpoint}`, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -433,7 +438,7 @@ export async function fetchKVRecordContent(
 ): Promise<{ text: string; truncated: boolean; size: number; contentType: string } | null> {
   const token = getToken();
   const res = await fetch(
-    `${API_URL}/v2/key-value-stores/${storeId}/records/${encodeURIComponent(key)}`,
+    `${getApiUrl()}/v2/key-value-stores/${storeId}/records/${encodeURIComponent(key)}`,
     { headers: token ? { Authorization: `Bearer ${token}` } : {} }
   );
   if (res.status === 404) return null;
@@ -487,7 +492,7 @@ async function fetchApi<T>(endpoint: string, options: RequestInit = {}): Promise
     (headers as Record<string, string>)['Authorization'] = `Bearer ${token}`;
   }
 
-  const res = await fetch(`${API_URL}${endpoint}`, {
+  const res = await fetch(`${getApiUrl()}${endpoint}`, {
     ...options,
     headers,
   });

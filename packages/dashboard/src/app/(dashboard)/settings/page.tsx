@@ -24,6 +24,7 @@ import {
   createApiKey,
   getMyApifyProfile,
   getApiKeys,
+  getApiUrl,
   getSystemInfo,
   revokeApiKey,
   setMyProxyPassword,
@@ -33,11 +34,10 @@ import {
 } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3000';
-
 export default function SettingsPage() {
   const confirm = useConfirm();
   const toast = useToast();
+  const API_BASE = getApiUrl();
 
   const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
   const [loading, setLoading] = useState(true);

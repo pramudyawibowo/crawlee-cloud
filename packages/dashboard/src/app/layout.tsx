@@ -34,8 +34,18 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const runtimeApiUrl = process.env.NEXT_PUBLIC_API_URL || process.env.API_URL || '';
+
   return (
     <html lang="en" className="h-full" suppressHydrationWarning>
+      <head>
+        <script
+          id="runtime-env"
+          dangerouslySetInnerHTML={{
+            __html: `window.__ENV__ = { NEXT_PUBLIC_API_URL: ${JSON.stringify(runtimeApiUrl)} };`,
+          }}
+        />
+      </head>
       <body
         className={cn(
           sans.variable,
