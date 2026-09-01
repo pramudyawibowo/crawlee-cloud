@@ -281,8 +281,58 @@ export async function syncUserOidcGroups(userId: string, groupNames: string[]): 
       );
 
       for (const org of found.rows) {
-        // Ensure user is enrolled as member in this mapped team
-        await addOrganizationMember(org.id, userId, 'member');
+        // Check if user is already a member
+        const existing = await pool.query<{ role: string }>(
+          'SELECT role FROM organization_members WHERE org_id = $1 AND user_id = $2',
+          [org.id, userId]
+        );
+
+        if (existing?.rows?.[0]) {
+          // If the org has NO owner and NO admin at all, promote this user if they are system admin or the first member
+          const members = await pool.query<{ user_id: string; role: string; created_at: Date }>(
+            'SELECT user_id, role, created_at FROM organization_members WHERE org_id = $1 ORDER BY created_at ASC',
+            [org.id]
+          );
+          const hasOwnerOrAdmin = members?.rows?.some(
+            (m) => m.role === 'owner' || m.role === 'admin'
+          );
+          const isFirstMember = members?.rows?.[0]?.user_id === userId;
+
+          const userRes = await pool.query<{ role: string }>(
+            'SELECT role FROM users WHERE id = $1',
+            [userId]
+          );
+          const isSystemAdmin = userRes?.rows?.[0]?.role === 'admin';
+
+          if (!hasOwnerOrAdmin && (isSystemAdmin || isFirstMember)) {
+            await pool.query(
+              'UPDATE organization_members SET role = $1 WHERE org_id = $2 AND user_id = $3',
+              ['admin', org.id, userId]
+            );
+          }
+          // Do NOT downgrade or alter existing roles
+          continue;
+        }
+
+        // New member joining via OIDC group sync
+        const userRes = await pool.query<{ role: string }>('SELECT role FROM users WHERE id = $1', [
+          userId,
+        ]);
+        const isSystemAdmin = userRes?.rows?.[0]?.role === 'admin';
+        const memberCountRes = await pool.query<{ count: string }>(
+          'SELECT COUNT(*) as count FROM organization_members WHERE org_id = $1',
+          [org.id]
+        );
+        const hasNoMembers = parseInt(memberCountRes?.rows?.[0]?.count ?? '0', 10) === 0;
+
+        const roleToAssign: OrgRole = isSystemAdmin || hasNoMembers ? 'admin' : 'member';
+
+        await pool.query(
+          `INSERT INTO organization_members (id, org_id, user_id, role, created_at)
+           VALUES ($1, $2, $3, $4, NOW())
+           ON CONFLICT (org_id, user_id) DO NOTHING`,
+          [nanoid(), org.id, userId, roleToAssign]
+        );
       }
     } catch (err) {
       console.warn(

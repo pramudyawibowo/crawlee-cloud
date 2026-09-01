@@ -153,11 +153,9 @@ export const organizationsRoutes: FastifyPluginAsync = async (fastify) => {
     const isMember = members.some((m) => m.user_id === userId);
 
     if (!isOwner && !isAdmin && request.user?.role !== 'admin' && !(isMember && !hasOwner)) {
-      return reply
-        .status(403)
-        .send({
-          error: { message: 'Owner or Admin privileges required to delete this organization' },
-        });
+      return reply.status(403).send({
+        error: { message: 'Owner or Admin privileges required to delete this organization' },
+      });
     }
 
     await deleteOrganization(id);
@@ -219,14 +217,18 @@ export const organizationsRoutes: FastifyPluginAsync = async (fastify) => {
     const body = updateMemberRoleSchema.parse(request.body);
 
     const hasAccess = await verifyOrgAccess(userId, id, 'admin');
-    if (!hasAccess && request.user?.role !== 'admin') {
+    const members = await getOrganizationMembers(id);
+    const hasAdminOrOwner = members.some((m) => m.role === 'owner' || m.role === 'admin');
+    const isMember = members.some((m) => m.user_id === userId);
+
+    if (!hasAccess && request.user?.role !== 'admin' && !(isMember && !hasAdminOrOwner)) {
       return reply.status(403).send({ error: { message: 'Admin or Owner privileges required' } });
     }
 
-    // Only owner can assign owner role
+    // Only owner can assign owner role unless no owner/admin exists or user is platform admin
     if (body.role === 'owner') {
       const isOwner = await verifyOrgAccess(userId, id, 'owner');
-      if (!isOwner && request.user?.role !== 'admin') {
+      if (!isOwner && request.user?.role !== 'admin' && !(isMember && !hasAdminOrOwner)) {
         return reply
           .status(403)
           .send({ error: { message: 'Only an existing owner can transfer ownership' } });

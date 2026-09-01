@@ -112,21 +112,21 @@ export default function TeamsPage() {
   }, [selectedOrgId, loadOrgDetail]);
 
   const isSystemAdmin = user?.role === 'admin';
-  const hasOwner = orgDetail?.members?.some((m) => m.role === 'owner');
+  const hasAdminOrOwner = orgDetail?.members?.some((m) => m.role === 'owner' || m.role === 'admin');
   const isSingleMember = (orgDetail?.members?.length ?? 0) <= 1;
 
   const canManage =
     isSystemAdmin ||
     orgDetail?.myRole === 'owner' ||
     orgDetail?.myRole === 'admin' ||
-    !hasOwner ||
+    !hasAdminOrOwner ||
     isSingleMember;
 
   const canDelete =
     isSystemAdmin ||
     orgDetail?.myRole === 'owner' ||
     orgDetail?.myRole === 'admin' ||
-    !hasOwner ||
+    !hasAdminOrOwner ||
     isSingleMember;
 
   async function handleCreateTeam(e: React.FormEvent) {
@@ -576,7 +576,7 @@ export default function TeamsPage() {
                               </td>
 
                               <td className="py-3">
-                                {canManage && !isMemberOwner ? (
+                                {canManage ? (
                                   <select
                                     value={m.role}
                                     onChange={(e) =>
@@ -584,6 +584,7 @@ export default function TeamsPage() {
                                     }
                                     className="px-2 py-1 text-[11px] bg-secondary/50 border border-border rounded-sm text-foreground focus:outline-none focus:border-signal uppercase tracking-wider"
                                   >
+                                    <option value="owner">Owner</option>
                                     <option value="admin">Admin</option>
                                     <option value="member">Member</option>
                                     <option value="viewer">Viewer</option>

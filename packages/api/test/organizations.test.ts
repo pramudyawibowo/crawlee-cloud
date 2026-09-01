@@ -220,7 +220,13 @@ describe('Organizations and Teams API', () => {
       mockPoolQuery.mockResolvedValueOnce({
         rows: [{ id: 'org-devops', name: 'devops', slug: 'devops' }],
       });
-      // 2. Add member to org-devops
+      // 2. Check existing membership
+      mockPoolQuery.mockResolvedValueOnce({ rows: [] });
+      // 3. User role check
+      mockPoolQuery.mockResolvedValueOnce({ rows: [{ role: 'user' }] });
+      // 4. Member count check
+      mockPoolQuery.mockResolvedValueOnce({ rows: [{ count: '1' }] });
+      // 5. Insert member
       mockPoolQuery.mockResolvedValueOnce({ rows: [] });
 
       await syncUserOidcGroups('user-1', ['devops']);
