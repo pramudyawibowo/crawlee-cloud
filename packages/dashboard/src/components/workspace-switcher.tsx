@@ -21,7 +21,7 @@ export function WorkspaceSwitcher() {
   const { activeOrgId, activeOrg, organizations, setActiveOrgId, refreshOrganizations } =
     useWorkspace();
   const router = useRouter();
-  const { toast } = useToast();
+  const toast = useToast();
 
   const [isOpen, setIsOpen] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -60,18 +60,14 @@ export function WorkspaceSwitcher() {
       setName('');
       setDescription('');
       setOidcGroup('');
-      toast({
-        title: 'Team created',
+      toast.success('Team created', {
         description: `Switched to ${newOrg.name}`,
-        variant: 'success',
       });
       // Soft refresh
       router.refresh();
     } catch (err) {
-      toast({
-        title: 'Failed to create team',
+      toast.error('Failed to create team', {
         description: err instanceof Error ? err.message : 'Unknown error',
-        variant: 'error',
       });
     } finally {
       setIsSubmitting(false);
@@ -81,12 +77,10 @@ export function WorkspaceSwitcher() {
   function handleSwitch(orgId: string | null) {
     setActiveOrgId(orgId);
     setIsOpen(false);
-    toast({
-      title: 'Workspace switched',
+    toast.info('Workspace switched', {
       description: orgId
         ? `Switched to ${organizations.find((o) => o.id === orgId)?.name}`
         : 'Switched to Personal Workspace',
-      variant: 'default',
     });
     router.refresh();
   }

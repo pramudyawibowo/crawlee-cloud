@@ -31,7 +31,7 @@ import { useConfirm } from '@/components/ui/confirm';
 
 export default function TeamsPage() {
   const { organizations, activeOrgId, setActiveOrgId, refreshOrganizations } = useWorkspace();
-  const { toast } = useToast();
+  const toast = useToast();
   const confirm = useConfirm();
 
   const [selectedOrgId, setSelectedOrgId] = useState<string | null>(null);
@@ -76,10 +76,8 @@ export default function TeamsPage() {
           oidcGroup: detail.oidc_group || '',
         });
       } catch (err) {
-        toast({
-          title: 'Failed to load team details',
+        toast.error('Failed to load team details', {
           description: err instanceof Error ? err.message : 'Unknown error',
-          variant: 'error',
         });
       } finally {
         setIsLoadingDetail(false);
@@ -117,16 +115,12 @@ export default function TeamsPage() {
       setActiveOrgId(newOrg.id);
       setShowCreateModal(false);
       setCreateForm({ name: '', slug: '', description: '', oidcGroup: '' });
-      toast({
-        title: 'Team created successfully',
+      toast.success('Team created successfully', {
         description: `${newOrg.name} is now your active workspace`,
-        variant: 'success',
       });
     } catch (err) {
-      toast({
-        title: 'Failed to create team',
+      toast.error('Failed to create team', {
         description: err instanceof Error ? err.message : 'Unknown error',
-        variant: 'error',
       });
     } finally {
       setIsSubmitting(false);
@@ -149,16 +143,12 @@ export default function TeamsPage() {
       await refreshOrganizations();
       await loadOrgDetail(selectedOrgId);
       setShowEditModal(false);
-      toast({
-        title: 'Team updated',
+      toast.success('Team updated', {
         description: 'Organization settings saved successfully',
-        variant: 'success',
       });
     } catch (err) {
-      toast({
-        title: 'Failed to update team',
+      toast.error('Failed to update team', {
         description: err instanceof Error ? err.message : 'Unknown error',
-        variant: 'error',
       });
     } finally {
       setIsSubmitting(false);
@@ -169,29 +159,25 @@ export default function TeamsPage() {
     if (!selectedOrgId || !orgDetail) return;
     const ok = await confirm({
       title: `Delete team "${orgDetail.name}"?`,
-      message:
+      description:
         'This action is irreversible. All team members, shared actors, datasets, and execution runs owned by this team will be permanently deleted.',
-      confirmText: 'Delete Team',
-      variant: 'danger',
+      confirmLabel: 'Delete Team',
+      tone: 'danger',
     });
 
     if (!ok) return;
 
     try {
       await deleteOrganization(selectedOrgId);
-      toast({
-        title: 'Team deleted',
+      toast.success('Team deleted', {
         description: `Team ${orgDetail.name} has been removed`,
-        variant: 'success',
       });
       setSelectedOrgId(null);
       setActiveOrgId(null);
       await refreshOrganizations();
     } catch (err) {
-      toast({
-        title: 'Failed to delete team',
+      toast.error('Failed to delete team', {
         description: err instanceof Error ? err.message : 'Unknown error',
-        variant: 'error',
       });
     }
   }
@@ -206,16 +192,12 @@ export default function TeamsPage() {
       await loadOrgDetail(selectedOrgId);
       setShowInviteModal(false);
       setInviteForm({ email: '', role: 'member' });
-      toast({
-        title: 'Member added',
+      toast.success('Member added', {
         description: `${inviteForm.email} has been added as ${inviteForm.role}`,
-        variant: 'success',
       });
     } catch (err) {
-      toast({
-        title: 'Failed to add member',
+      toast.error('Failed to add member', {
         description: err instanceof Error ? err.message : 'Unknown error',
-        variant: 'error',
       });
     } finally {
       setIsSubmitting(false);
@@ -227,16 +209,12 @@ export default function TeamsPage() {
     try {
       await updateOrgMemberRole(selectedOrgId, memberUserId, newRole);
       await loadOrgDetail(selectedOrgId);
-      toast({
-        title: 'Role updated',
+      toast.success('Role updated', {
         description: `Member role changed to ${newRole}`,
-        variant: 'success',
       });
     } catch (err) {
-      toast({
-        title: 'Failed to update role',
+      toast.error('Failed to update role', {
         description: err instanceof Error ? err.message : 'Unknown error',
-        variant: 'error',
       });
     }
   }
@@ -245,9 +223,9 @@ export default function TeamsPage() {
     if (!selectedOrgId) return;
     const ok = await confirm({
       title: `Remove member?`,
-      message: `Remove ${member.user_email || 'this member'} from the team?`,
-      confirmText: 'Remove',
-      variant: 'danger',
+      description: `Remove ${member.user_email || 'this member'} from the team?`,
+      confirmLabel: 'Remove',
+      tone: 'danger',
     });
 
     if (!ok) return;
@@ -255,15 +233,10 @@ export default function TeamsPage() {
     try {
       await removeOrgMember(selectedOrgId, member.user_id);
       await loadOrgDetail(selectedOrgId);
-      toast({
-        title: 'Member removed',
-        variant: 'success',
-      });
+      toast.success('Member removed');
     } catch (err) {
-      toast({
-        title: 'Failed to remove member',
+      toast.error('Failed to remove member', {
         description: err instanceof Error ? err.message : 'Unknown error',
-        variant: 'error',
       });
     }
   }
@@ -391,10 +364,8 @@ export default function TeamsPage() {
                         <button
                           onClick={() => {
                             setActiveOrgId(orgDetail.id);
-                            toast({
-                              title: 'Switched workspace',
+                            toast.info('Switched workspace', {
                               description: `Now working inside ${orgDetail.name}`,
-                              variant: 'default',
                             });
                           }}
                           className="px-3 py-1 text-xs border border-signal/40 bg-signal/10 hover:bg-signal/20 text-signal rounded-sm transition-colors"
