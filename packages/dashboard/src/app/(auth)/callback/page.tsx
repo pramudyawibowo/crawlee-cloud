@@ -57,7 +57,7 @@ export default function AuthCallbackPage() {
 
   return (
     <div className="min-h-screen flex items-center justify-center p-6 bg-background">
-      <div className="w-full max-w-sm p-6 border border-border bg-surface-1 rounded-md text-center space-y-4">
+      <div className="w-full max-w-sm p-6 border border-border bg-card text-card-foreground rounded-md text-center space-y-4">
         {error ? (
           <div className="space-y-4">
             <div className="h-10 w-10 mx-auto rounded-full bg-fail/10 border border-fail/20 flex items-center justify-center text-fail">

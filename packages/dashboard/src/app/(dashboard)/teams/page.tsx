@@ -268,7 +268,7 @@ export default function TeamsPage() {
 
       {organizations.length === 0 ? (
         /* Empty State */
-        <div className="border border-dashed border-border bg-surface-1 rounded-sm p-12 text-center font-mono space-y-4">
+        <div className="border border-dashed border-border bg-card rounded-sm p-12 text-center font-mono space-y-4">
           <div className="h-12 w-12 rounded-full bg-secondary/60 mx-auto flex items-center justify-center text-muted-foreground">
             <Building2 className="h-6 w-6" />
           </div>
@@ -292,7 +292,7 @@ export default function TeamsPage() {
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 items-start font-mono">
           {/* Team List Navigation */}
-          <div className="border border-border bg-surface-1 rounded-sm p-3 space-y-2">
+          <div className="border border-border bg-card rounded-sm p-3 space-y-2">
             <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-muted-foreground">
               Your Teams ({organizations.length})
             </div>
@@ -331,14 +331,14 @@ export default function TeamsPage() {
           {/* Team Details & Members */}
           <div className="lg:col-span-3 space-y-6">
             {isLoadingDetail || !orgDetail ? (
-              <div className="border border-border bg-surface-1 rounded-sm p-12 text-center">
+              <div className="border border-border bg-card rounded-sm p-12 text-center">
                 <Loader2 className="h-6 w-6 animate-spin text-signal mx-auto" />
                 <p className="text-xs text-muted-foreground mt-2">Loading team details...</p>
               </div>
             ) : (
               <>
                 {/* Team Info Card */}
-                <div className="border border-border bg-surface-1 rounded-sm p-5 space-y-4">
+                <div className="border border-border bg-card rounded-sm p-5 space-y-4">
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-border pb-4">
                     <div className="flex items-center gap-3 min-w-0">
                       <div className="h-10 w-10 rounded-sm bg-secondary/80 border border-border flex items-center justify-center text-signal shrink-0">
@@ -413,7 +413,7 @@ export default function TeamsPage() {
                 </div>
 
                 {/* Members List Card */}
-                <div className="border border-border bg-surface-1 rounded-sm p-5 space-y-4">
+                <div className="border border-border bg-card rounded-sm p-5 space-y-4">
                   <div className="flex items-center justify-between gap-3 border-b border-border pb-3">
                     <div>
                       <h3 className="text-sm font-semibold uppercase tracking-wider text-foreground">
@@ -473,7 +473,7 @@ export default function TeamsPage() {
                                     onChange={(e) =>
                                       handleRoleChange(m.user_id, e.target.value as OrgRole)
                                     }
-                                    className="px-2 py-1 text-[11px] bg-surface-2 border border-border rounded-sm text-foreground focus:outline-none focus:border-signal uppercase tracking-wider"
+                                    className="px-2 py-1 text-[11px] bg-secondary/50 border border-border rounded-sm text-foreground focus:outline-none focus:border-signal uppercase tracking-wider"
                                   >
                                     <option value="admin">Admin</option>
                                     <option value="member">Member</option>
@@ -526,7 +526,7 @@ export default function TeamsPage() {
       {/* Create Team Modal */}
       {showCreateModal && (
         <div className="fixed inset-0 bg-background/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="w-full max-w-md bg-surface-1 border border-border rounded-sm shadow-xl p-6 font-mono space-y-4 animate-in fade-in-0 zoom-in-95">
+          <div className="w-full max-w-md bg-card text-card-foreground border border-border rounded-sm shadow-2xl p-6 font-mono space-y-4 animate-in fade-in-0 zoom-in-95">
             <div className="flex items-center gap-2.5 text-foreground border-b border-border pb-3">
               <Building2 className="h-5 w-5 text-signal" />
               <div>
@@ -548,7 +548,7 @@ export default function TeamsPage() {
                   placeholder="e.g. Data Scraping Operations"
                   value={createForm.name}
                   onChange={(e) => setCreateForm({ ...createForm, name: e.target.value })}
-                  className="w-full h-8 px-2.5 text-xs bg-surface-2 border border-border rounded-sm text-foreground focus:outline-none focus:border-signal"
+                  className="w-full h-8 px-2.5 text-xs bg-secondary/50 border border-border rounded-sm text-foreground focus:outline-none focus:border-signal"
                 />
               </div>
 
@@ -561,7 +561,7 @@ export default function TeamsPage() {
                   placeholder="e.g. data-scraping-ops"
                   value={createForm.slug}
                   onChange={(e) => setCreateForm({ ...createForm, slug: e.target.value })}
-                  className="w-full h-8 px-2.5 text-xs bg-surface-2 border border-border rounded-sm text-foreground focus:outline-none focus:border-signal"
+                  className="w-full h-8 px-2.5 text-xs bg-secondary/50 border border-border rounded-sm text-foreground focus:outline-none focus:border-signal"
                 />
               </div>
 
@@ -574,7 +574,7 @@ export default function TeamsPage() {
                   placeholder="e.g. Shared scrapers for market analytics"
                   value={createForm.description}
                   onChange={(e) => setCreateForm({ ...createForm, description: e.target.value })}
-                  className="w-full h-8 px-2.5 text-xs bg-surface-2 border border-border rounded-sm text-foreground focus:outline-none focus:border-signal"
+                  className="w-full h-8 px-2.5 text-xs bg-secondary/50 border border-border rounded-sm text-foreground focus:outline-none focus:border-signal"
                 />
               </div>
 
@@ -589,7 +589,7 @@ export default function TeamsPage() {
                     placeholder="e.g. scraper-engineers"
                     value={createForm.oidcGroup}
                     onChange={(e) => setCreateForm({ ...createForm, oidcGroup: e.target.value })}
-                    className="w-full h-8 px-2.5 text-xs bg-surface-2 border border-border rounded-sm text-foreground focus:outline-none focus:border-signal"
+                    className="w-full h-8 px-2.5 text-xs bg-secondary/50 border border-border rounded-sm text-foreground focus:outline-none focus:border-signal"
                   />
                 </div>
               </div>
@@ -626,7 +626,7 @@ export default function TeamsPage() {
       {/* Edit Team Settings Modal */}
       {showEditModal && (
         <div className="fixed inset-0 bg-background/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="w-full max-w-md bg-surface-1 border border-border rounded-sm shadow-xl p-6 font-mono space-y-4 animate-in fade-in-0 zoom-in-95">
+          <div className="w-full max-w-md bg-card text-card-foreground border border-border rounded-sm shadow-2xl p-6 font-mono space-y-4 animate-in fade-in-0 zoom-in-95">
             <div className="flex items-center gap-2.5 text-foreground border-b border-border pb-3">
               <Settings className="h-5 w-5 text-signal" />
               <div>
@@ -647,7 +647,7 @@ export default function TeamsPage() {
                   required
                   value={editForm.name}
                   onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
-                  className="w-full h-8 px-2.5 text-xs bg-surface-2 border border-border rounded-sm text-foreground focus:outline-none focus:border-signal"
+                  className="w-full h-8 px-2.5 text-xs bg-secondary/50 border border-border rounded-sm text-foreground focus:outline-none focus:border-signal"
                 />
               </div>
 
@@ -659,7 +659,7 @@ export default function TeamsPage() {
                   type="text"
                   value={editForm.slug}
                   onChange={(e) => setEditForm({ ...editForm, slug: e.target.value })}
-                  className="w-full h-8 px-2.5 text-xs bg-surface-2 border border-border rounded-sm text-foreground focus:outline-none focus:border-signal"
+                  className="w-full h-8 px-2.5 text-xs bg-secondary/50 border border-border rounded-sm text-foreground focus:outline-none focus:border-signal"
                 />
               </div>
 
@@ -671,7 +671,7 @@ export default function TeamsPage() {
                   type="text"
                   value={editForm.description}
                   onChange={(e) => setEditForm({ ...editForm, description: e.target.value })}
-                  className="w-full h-8 px-2.5 text-xs bg-surface-2 border border-border rounded-sm text-foreground focus:outline-none focus:border-signal"
+                  className="w-full h-8 px-2.5 text-xs bg-secondary/50 border border-border rounded-sm text-foreground focus:outline-none focus:border-signal"
                 />
               </div>
 
@@ -684,7 +684,7 @@ export default function TeamsPage() {
                   placeholder="e.g. devops-team"
                   value={editForm.oidcGroup}
                   onChange={(e) => setEditForm({ ...editForm, oidcGroup: e.target.value })}
-                  className="w-full h-8 px-2.5 text-xs bg-surface-2 border border-border rounded-sm text-foreground focus:outline-none focus:border-signal"
+                  className="w-full h-8 px-2.5 text-xs bg-secondary/50 border border-border rounded-sm text-foreground focus:outline-none focus:border-signal"
                 />
               </div>
 
@@ -720,7 +720,7 @@ export default function TeamsPage() {
       {/* Invite Member Modal */}
       {showInviteModal && (
         <div className="fixed inset-0 bg-background/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="w-full max-w-md bg-surface-1 border border-border rounded-sm shadow-xl p-6 font-mono space-y-4 animate-in fade-in-0 zoom-in-95">
+          <div className="w-full max-w-md bg-card text-card-foreground border border-border rounded-sm shadow-2xl p-6 font-mono space-y-4 animate-in fade-in-0 zoom-in-95">
             <div className="flex items-center gap-2.5 text-foreground border-b border-border pb-3">
               <UserPlus className="h-5 w-5 text-signal" />
               <div>
@@ -744,7 +744,7 @@ export default function TeamsPage() {
                     placeholder="teammate@company.com"
                     value={inviteForm.email}
                     onChange={(e) => setInviteForm({ ...inviteForm, email: e.target.value })}
-                    className="w-full h-8 px-2.5 text-xs bg-surface-2 border border-border rounded-sm text-foreground focus:outline-none focus:border-signal"
+                    className="w-full h-8 px-2.5 text-xs bg-secondary/50 border border-border rounded-sm text-foreground focus:outline-none focus:border-signal"
                   />
                 </div>
               </div>
@@ -758,7 +758,7 @@ export default function TeamsPage() {
                   onChange={(e) =>
                     setInviteForm({ ...inviteForm, role: e.target.value as OrgRole })
                   }
-                  className="w-full h-8 px-2.5 text-xs bg-surface-2 border border-border rounded-sm text-foreground focus:outline-none focus:border-signal uppercase tracking-wider"
+                  className="w-full h-8 px-2.5 text-xs bg-secondary/50 border border-border rounded-sm text-foreground focus:outline-none focus:border-signal uppercase tracking-wider"
                 >
                   <option value="member">Member (Can create, edit & run actors)</option>
                   <option value="admin">Admin (Can manage members & team settings)</option>

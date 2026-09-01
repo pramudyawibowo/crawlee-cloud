@@ -89,7 +89,7 @@ export function WorkspaceSwitcher() {
     <div className="relative px-3 py-2 border-b border-border" ref={dropdownRef}>
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className="w-full flex items-center justify-between gap-2 p-2 rounded-sm border border-border bg-surface-1 hover:bg-surface-2 transition-colors text-left font-mono"
+        className="w-full flex items-center justify-between gap-2 p-2 rounded-sm border border-border bg-card hover:bg-secondary/60 transition-colors text-left font-mono"
         aria-label="Select workspace"
       >
         <div className="flex items-center gap-2.5 min-w-0">
@@ -109,47 +109,51 @@ export function WorkspaceSwitcher() {
       </button>
 
       {isOpen && (
-        <div className="absolute left-3 right-3 top-full mt-1 z-50 rounded-sm border border-border bg-surface-1 shadow-lg py-1 font-mono text-[12px] animate-in fade-in-0 zoom-in-95">
-          <div className="px-2.5 py-1 text-[10px] uppercase tracking-wider text-muted-foreground">
-            Personal
-          </div>
-          <button
-            onClick={() => handleSwitch(null)}
-            className="w-full flex items-center justify-between px-2.5 py-1.5 hover:bg-secondary/40 text-foreground text-left transition-colors"
-          >
-            <div className="flex items-center gap-2 min-w-0">
-              <User className="h-3.5 w-3.5 text-muted-foreground" />
-              <span className="truncate">Personal Workspace</span>
+        <div className="absolute left-3 right-3 top-full mt-1.5 z-50 rounded-sm border border-border bg-card text-card-foreground shadow-2xl py-1 font-mono text-[12px] animate-in fade-in-0 zoom-in-95">
+          <div className="max-h-72 overflow-y-auto">
+            <div className="px-2.5 py-1 text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">
+              Personal
             </div>
-            {!activeOrgId && <Check className="h-3.5 w-3.5 text-signal shrink-0" />}
-          </button>
-
-          {organizations.length > 0 && (
-            <>
-              <div className="my-1 border-t border-border" />
-              <div className="px-2.5 py-1 text-[10px] uppercase tracking-wider text-muted-foreground">
-                Teams & Organizations
+            <button
+              onClick={() => handleSwitch(null)}
+              className="w-full flex items-center justify-between px-2.5 py-1.5 hover:bg-secondary/60 text-foreground text-left transition-colors"
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <User className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                <span className="truncate">Personal Workspace</span>
               </div>
-              {organizations.map((org) => (
-                <button
-                  key={org.id}
-                  onClick={() => handleSwitch(org.id)}
-                  className="w-full flex items-center justify-between px-2.5 py-1.5 hover:bg-secondary/40 text-foreground text-left transition-colors"
-                >
-                  <div className="flex items-center gap-2 min-w-0">
-                    <Building2 className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                    <div className="min-w-0">
-                      <p className="truncate leading-none">{org.name}</p>
-                      <span className="text-[9px] text-muted-foreground capitalize">
-                        {org.member_role || 'member'}
-                      </span>
+              {!activeOrgId && <Check className="h-3.5 w-3.5 text-signal shrink-0" />}
+            </button>
+
+            {organizations.length > 0 && (
+              <>
+                <div className="my-1 border-t border-border" />
+                <div className="px-2.5 py-1 text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">
+                  Teams & Organizations ({organizations.length})
+                </div>
+                {organizations.map((org) => (
+                  <button
+                    key={org.id}
+                    onClick={() => handleSwitch(org.id)}
+                    className="w-full flex items-center justify-between px-2.5 py-1.5 hover:bg-secondary/60 text-foreground text-left transition-colors"
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Building2 className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                      <div className="min-w-0">
+                        <p className="truncate leading-none font-medium">{org.name}</p>
+                        <span className="text-[9px] text-muted-foreground capitalize">
+                          {org.member_role || 'member'}
+                        </span>
+                      </div>
                     </div>
-                  </div>
-                  {activeOrgId === org.id && <Check className="h-3.5 w-3.5 text-signal shrink-0" />}
-                </button>
-              ))}
-            </>
-          )}
+                    {activeOrgId === org.id && (
+                      <Check className="h-3.5 w-3.5 text-signal shrink-0" />
+                    )}
+                  </button>
+                ))}
+              </>
+            )}
+          </div>
 
           <div className="my-1 border-t border-border" />
 
@@ -158,7 +162,7 @@ export function WorkspaceSwitcher() {
               setIsOpen(false);
               setShowCreateModal(true);
             }}
-            className="w-full flex items-center gap-2 px-2.5 py-1.5 hover:bg-secondary/40 text-signal text-left transition-colors"
+            className="w-full flex items-center gap-2 px-2.5 py-1.5 hover:bg-secondary/60 text-signal text-left transition-colors font-medium"
           >
             <Plus className="h-3.5 w-3.5" />
             <span>Create New Team</span>
@@ -169,7 +173,7 @@ export function WorkspaceSwitcher() {
               setIsOpen(false);
               router.push(prefixPath('/teams'));
             }}
-            className="w-full flex items-center gap-2 px-2.5 py-1.5 hover:bg-secondary/40 text-muted-foreground hover:text-foreground text-left transition-colors"
+            className="w-full flex items-center gap-2 px-2.5 py-1.5 hover:bg-secondary/60 text-muted-foreground hover:text-foreground text-left transition-colors"
           >
             <Settings2 className="h-3.5 w-3.5" />
             <span>Manage Teams</span>
@@ -180,7 +184,7 @@ export function WorkspaceSwitcher() {
       {/* Create Team Modal */}
       {showCreateModal && (
         <div className="fixed inset-0 bg-background/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="w-full max-w-md bg-surface-1 border border-border rounded-sm shadow-xl p-6 font-mono space-y-4 animate-in fade-in-0 zoom-in-95">
+          <div className="w-full max-w-md bg-card text-card-foreground border border-border rounded-sm shadow-2xl p-6 font-mono space-y-4 animate-in fade-in-0 zoom-in-95">
             <div className="flex items-center gap-2.5 text-foreground border-b border-border pb-3">
               <Building2 className="h-5 w-5 text-signal" />
               <div>
