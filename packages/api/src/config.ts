@@ -53,6 +53,19 @@ export interface Config {
 
   /** $/compute-unit for the "same run on Apify" estimate (1 CU = 1 GB × 1 h). */
   apifyCuPrice: number;
+
+  // OIDC Generic SSO
+  oidcEnabled: boolean;
+  oidcIssuerUrl?: string;
+  oidcClientId?: string;
+  oidcClientSecret?: string;
+  oidcScopes: string;
+  oidcRedirectUri?: string;
+  oidcRolesClaim: string;
+  oidcAdminRoles: string[];
+  oidcDefaultRole: 'admin' | 'user';
+  oidcAutoRegister: boolean;
+  oidcProviderName: string;
 }
 
 const isDevelopment = process.env.NODE_ENV !== 'production';
@@ -169,4 +182,20 @@ export const config: Config = {
 
   // Run cost analysis — Apify Starter-plan CU rate by default.
   apifyCuPrice: envFloat('APIFY_CU_PRICE', 0.4),
+
+  // OIDC Generic SSO
+  oidcEnabled: envBool('OIDC_ENABLED', false),
+  oidcIssuerUrl: envOptional('OIDC_ISSUER_URL'),
+  oidcClientId: envOptional('OIDC_CLIENT_ID'),
+  oidcClientSecret: envOptional('OIDC_CLIENT_SECRET'),
+  oidcScopes: process.env.OIDC_SCOPES || 'openid email profile groups',
+  oidcRedirectUri: envOptional('OIDC_REDIRECT_URI'),
+  oidcRolesClaim: process.env.OIDC_ROLES_CLAIM || 'roles',
+  oidcAdminRoles: (process.env.OIDC_ADMIN_ROLES || 'admin,crawlee-admins,DevOps')
+    .split(',')
+    .map((r) => r.trim().toLowerCase())
+    .filter(Boolean),
+  oidcDefaultRole: process.env.OIDC_DEFAULT_ROLE === 'admin' ? 'admin' : 'user',
+  oidcAutoRegister: envBool('OIDC_AUTO_REGISTER', true),
+  oidcProviderName: process.env.OIDC_PROVIDER_NAME || 'SSO',
 };

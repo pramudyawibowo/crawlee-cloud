@@ -1,8 +1,8 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import Image from 'next/image';
-import { Loader2, LogIn, ShieldAlert } from 'lucide-react';
+import { KeyRound, Loader2, LogIn, ShieldAlert } from 'lucide-react';
 import { APP_VERSION } from '@/lib/constants';
 import { prefixPath } from '@/lib/path-prefix';
 import { getApiUrl } from '@/lib/api';
@@ -12,6 +12,39 @@ export default function LoginPage() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [oidcProvider, setOidcProvider] = useState<{
+    enabled: boolean;
+    name: string;
+    loginUrl: string;
+  } | null>(null);
+
+  useEffect(() => {
+    // Check URL params for error messages from OIDC redirect
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const urlError = params.get('error');
+      if (urlError) {
+        setError(decodeURIComponent(urlError));
+      }
+    }
+
+    async function loadProviders() {
+      try {
+        const apiUrl = getApiUrl();
+        const res = await fetch(`${apiUrl}/v2/auth/providers`);
+        if (res.ok) {
+          const json = await res.json();
+          if (json.data?.oidc) {
+            setOidcProvider(json.data.oidc);
+          }
+        }
+      } catch {
+        // Silently ignore provider fetch failures
+      }
+    }
+
+    void loadProviders();
+  }, []);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -203,6 +236,28 @@ export default function LoginPage() {
               )}
             </button>
           </form>
+
+          {oidcProvider?.enabled && (
+            <div className="space-y-4">
+              <div className="relative flex items-center justify-center">
+                <div className="border-t border-border w-full" />
+                <span className="bg-background px-3 font-mono text-[10px] tracking-widest text-muted-foreground uppercase">
+                  OR
+                </span>
+                <div className="border-t border-border w-full" />
+              </div>
+
+              <a
+                href={`${getApiUrl()}/v2/auth/oidc/login?return_to=${encodeURIComponent(
+                  typeof window !== 'undefined' ? window.location.origin : ''
+                )}`}
+                className="w-full h-10 inline-flex items-center justify-center gap-2 text-[12px] font-mono uppercase tracking-wider border border-border bg-surface-2 hover:bg-surface-3 text-foreground rounded-sm transition-colors cursor-pointer"
+              >
+                <KeyRound className="h-3.5 w-3.5 text-signal" /> Sign in with{' '}
+                {oidcProvider.name || 'SSO'}
+              </a>
+            </div>
+          )}
 
           <p className="font-mono text-[10px] tracking-widest text-muted-foreground text-center pt-4 border-t border-border">
             self-hosted · no account creation here

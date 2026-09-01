@@ -23,6 +23,17 @@ import {
 import { authenticate } from '../auth/middleware.js';
 import { invalidateApiKey } from '../auth/api-key-cache.js';
 
+import { config } from '../config.js';
+import {
+  getOidcAuthorizationUrl,
+  consumeOidcState,
+  exchangeOidcCode,
+  fetchOidcUserProfile,
+  extractRolesFromClaims,
+  mapOidcRolesToRole,
+  findOrCreateOidcUser,
+} from '../auth/oidc.js';
+
 const loginSchema = z.object({
   email: z.string().email(),
   password: z.string(),
@@ -35,6 +46,130 @@ const apiKeySchema = z.object({
 export async function authRoutes(app: FastifyInstance) {
   // Registration is disabled - admin user is created from env vars on startup
   // Users can be invited by admin (future feature)
+
+  /**
+   * List available authentication providers.
+   */
+  app.get('/v2/auth/providers', async (_request, reply) => {
+    return reply.send({
+      data: {
+        password: true,
+        oidc: {
+          enabled: config.oidcEnabled,
+          name: config.oidcProviderName,
+          loginUrl: '/v2/auth/oidc/login',
+        },
+      },
+    });
+  });
+
+  /**
+   * Initiate generic OIDC login flow.
+   */
+  app.get('/v2/auth/oidc/login', async (request, reply) => {
+    if (!config.oidcEnabled) {
+      return reply.status(404).send({ error: { message: 'OIDC authentication is not enabled' } });
+    }
+
+    const host =
+      (request.headers['x-forwarded-host'] as string) || request.headers.host || 'localhost:3000';
+    const proto =
+      (request.headers['x-forwarded-proto'] as string) ||
+      (request.protocol.startsWith('https') ? 'https' : 'http');
+    const defaultRedirectUri = `${proto}://${host}/v2/auth/oidc/callback`;
+    const redirectUri = config.oidcRedirectUri || defaultRedirectUri;
+
+    const query = request.query as { return_to?: string } | undefined;
+    const returnTo = query?.return_to;
+
+    try {
+      const { url } = await getOidcAuthorizationUrl({
+        redirectUri,
+        returnTo,
+      });
+
+      return reply.redirect(url);
+    } catch (err: unknown) {
+      request.log.error(err, 'Failed to generate OIDC authorization URL');
+      const message = err instanceof Error ? err.message : 'Failed to initiate OIDC login';
+      return reply.status(500).send({ error: { message } });
+    }
+  });
+
+  /**
+   * OIDC callback handler.
+   */
+  app.get('/v2/auth/oidc/callback', async (request, reply) => {
+    if (!config.oidcEnabled) {
+      return reply.status(404).send({ error: { message: 'OIDC authentication is not enabled' } });
+    }
+
+    const query = request.query as {
+      code?: string;
+      state?: string;
+      error?: string;
+      error_description?: string;
+    };
+
+    const host =
+      (request.headers['x-forwarded-host'] as string) || request.headers.host || 'localhost:3000';
+    const proto =
+      (request.headers['x-forwarded-proto'] as string) ||
+      (request.protocol.startsWith('https') ? 'https' : 'http');
+    const currentOrigin = `${proto}://${host}`;
+
+    if (query.error) {
+      const errorMsg = encodeURIComponent(query.error_description || query.error);
+      return reply.redirect(`/login?error=${errorMsg}`);
+    }
+
+    if (!query.code || !query.state) {
+      return reply.redirect('/login?error=Missing+code+or+state+from+OIDC+provider');
+    }
+
+    const stateData = await consumeOidcState(query.state);
+    if (!stateData) {
+      return reply.redirect('/login?error=Invalid+or+expired+OIDC+state');
+    }
+
+    try {
+      // 1. Exchange code for tokens
+      const tokens = await exchangeOidcCode(query.code, stateData.redirectUri);
+
+      // 2. Fetch and parse user profile & claims
+      const profile = await fetchOidcUserProfile(tokens);
+
+      // 3. Extract and map roles
+      const userRoles = extractRolesFromClaims(profile.rawClaims, config.oidcRolesClaim);
+      const computedRole = mapOidcRolesToRole(
+        userRoles,
+        config.oidcAdminRoles,
+        config.oidcDefaultRole
+      );
+
+      // 4. Auto-register or synchronize user
+      const user = await findOrCreateOidcUser(profile, computedRole);
+
+      // 5. Issue Crawlee Cloud JWT token
+      const token = createToken({
+        userId: user.id,
+        email: user.email,
+        role: user.role,
+      });
+
+      // 6. Redirect to dashboard with token
+      const targetBase = stateData.returnTo
+        ? stateData.returnTo.replace(/\/+$/, '')
+        : currentOrigin;
+      return reply.redirect(`${targetBase}/auth/callback?token=${encodeURIComponent(token)}`);
+    } catch (err: unknown) {
+      request.log.error(err, 'OIDC callback processing failed');
+      const message = encodeURIComponent(
+        err instanceof Error ? err.message : 'OIDC authentication failed'
+      );
+      return reply.redirect(`/login?error=${message}`);
+    }
+  });
 
   /**
    * Login and get JWT token.
