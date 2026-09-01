@@ -12,6 +12,11 @@ import {
   Mail,
   Crown,
   Settings,
+  ArrowRightLeft,
+  Box,
+  Database,
+  PlayCircle,
+  Clock,
 } from 'lucide-react';
 import { useWorkspace } from '@/lib/workspace-context';
 import {
@@ -22,9 +27,12 @@ import {
   addOrgMember,
   updateOrgMemberRole,
   removeOrgMember,
+  getTransferPreview,
+  transferResourcesToOrg,
   type OrganizationDetail,
   type OrganizationMember,
   type OrgRole,
+  type TransferPreviewData,
 } from '@/lib/api';
 import { useToast } from '@/components/ui/toast';
 import { useConfirm } from '@/components/ui/confirm';
@@ -42,6 +50,13 @@ export default function TeamsPage() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [showInviteModal, setShowInviteModal] = useState(false);
+  const [showTransferModal, setShowTransferModal] = useState(false);
+
+  // Transfer resources state
+  const [transferPreview, setTransferPreview] = useState<TransferPreviewData | null>(null);
+  const [isLoadingPreview, setIsLoadingPreview] = useState(false);
+  const [transferAllUnassigned, setTransferAllUnassigned] = useState(false);
+  const [isTransferring, setIsTransferring] = useState(false);
 
   // Forms
   const [createForm, setCreateForm] = useState({
@@ -241,6 +256,49 @@ export default function TeamsPage() {
     }
   }
 
+  async function openTransferModal() {
+    if (!selectedOrgId) return;
+    setShowTransferModal(true);
+    setIsLoadingPreview(true);
+    try {
+      const preview = await getTransferPreview(selectedOrgId);
+      setTransferPreview(preview);
+    } catch (err) {
+      toast.error('Failed to load transfer preview', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      });
+    } finally {
+      setIsLoadingPreview(false);
+    }
+  }
+
+  async function handleTransferResources() {
+    if (!selectedOrgId || !orgDetail) return;
+    setIsTransferring(true);
+    try {
+      const res = await transferResourcesToOrg(selectedOrgId, {
+        transferAllUnassigned,
+      });
+      const { actors, datasets, runs, schedules, keyValueStores, requestQueues, webhooks } =
+        res.transferred;
+      const total =
+        actors + datasets + runs + schedules + keyValueStores + requestQueues + webhooks;
+
+      toast.success('Resources Transferred Successfully', {
+        description: `Moved ${actors} actors, ${datasets} datasets, ${runs} runs, ${schedules} schedules to ${orgDetail.name} (Total: ${total} items).`,
+      });
+      setShowTransferModal(false);
+      await refreshOrganizations();
+      await loadOrgDetail(selectedOrgId);
+    } catch (err) {
+      toast.error('Failed to transfer resources', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      });
+    } finally {
+      setIsTransferring(false);
+    }
+  }
+
   return (
     <div className="space-y-6 max-w-6xl">
       {/* Header */}
@@ -371,6 +429,16 @@ export default function TeamsPage() {
                           className="px-3 py-1 text-xs border border-signal/40 bg-signal/10 hover:bg-signal/20 text-signal rounded-sm transition-colors"
                         >
                           Set as Active Workspace
+                        </button>
+                      )}
+                      {canManage && (
+                        <button
+                          onClick={openTransferModal}
+                          className="px-3 py-1 text-xs border border-border hover:border-signal/50 bg-secondary/50 hover:bg-secondary text-foreground rounded-sm transition-colors flex items-center gap-1.5"
+                          title="Transfer personal / unassigned resources to this team"
+                        >
+                          <ArrowRightLeft className="h-3.5 w-3.5 text-signal" />
+                          <span>Transfer Resources</span>
                         </button>
                       )}
                       {canManage && (
@@ -791,6 +859,148 @@ export default function TeamsPage() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Transfer Resources Modal */}
+      {showTransferModal && (
+        <div className="fixed inset-0 bg-background/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="w-full max-w-lg bg-card text-card-foreground border border-border rounded-sm shadow-2xl p-6 font-mono space-y-4 animate-in fade-in-0 zoom-in-95">
+            <div className="flex items-center gap-2.5 text-foreground border-b border-border pb-3">
+              <ArrowRightLeft className="h-5 w-5 text-signal" />
+              <div>
+                <h3 className="text-sm font-semibold uppercase tracking-wider">
+                  Transfer Resources to Team
+                </h3>
+                <p className="text-[11px] text-muted-foreground">
+                  Move Actors, Datasets, Runs & Schedules to{' '}
+                  <span className="text-foreground font-semibold">{orgDetail?.name}</span>
+                </p>
+              </div>
+            </div>
+
+            {isLoadingPreview ? (
+              <div className="py-12 text-center">
+                <Loader2 className="h-6 w-6 animate-spin text-signal mx-auto" />
+                <p className="text-xs text-muted-foreground mt-2">
+                  Checking available resources...
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  Resources transferred to this team will become shared assets. All team members
+                  with appropriate roles will be able to view, run, edit, and collaborate on them.
+                </p>
+
+                {/* Scope selector / summary */}
+                <div className="p-3 rounded-sm bg-secondary/30 border border-border space-y-3">
+                  <div className="text-[11px] font-semibold text-foreground uppercase tracking-wider">
+                    Resources to be Transferred:
+                  </div>
+
+                  {(() => {
+                    const activeSummary =
+                      transferAllUnassigned && transferPreview?.allUnassigned
+                        ? transferPreview.allUnassigned
+                        : transferPreview?.personal;
+
+                    if (!activeSummary) return null;
+
+                    return (
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                        <div className="p-2 rounded-sm bg-card border border-border">
+                          <div className="flex items-center gap-1.5 text-muted-foreground text-[10px] uppercase">
+                            <Box className="h-3.5 w-3.5 text-signal" /> Actors
+                          </div>
+                          <div className="text-base font-bold text-foreground mt-1">
+                            {activeSummary.actors}
+                          </div>
+                        </div>
+
+                        <div className="p-2 rounded-sm bg-card border border-border">
+                          <div className="flex items-center gap-1.5 text-muted-foreground text-[10px] uppercase">
+                            <Database className="h-3.5 w-3.5 text-signal" /> Datasets
+                          </div>
+                          <div className="text-base font-bold text-foreground mt-1">
+                            {activeSummary.datasets}
+                          </div>
+                        </div>
+
+                        <div className="p-2 rounded-sm bg-card border border-border">
+                          <div className="flex items-center gap-1.5 text-muted-foreground text-[10px] uppercase">
+                            <PlayCircle className="h-3.5 w-3.5 text-signal" /> Runs
+                          </div>
+                          <div className="text-base font-bold text-foreground mt-1">
+                            {activeSummary.runs}
+                          </div>
+                        </div>
+
+                        <div className="p-2 rounded-sm bg-card border border-border">
+                          <div className="flex items-center gap-1.5 text-muted-foreground text-[10px] uppercase">
+                            <Clock className="h-3.5 w-3.5 text-signal" /> Schedules
+                          </div>
+                          <div className="text-base font-bold text-foreground mt-1">
+                            {activeSummary.schedules}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                {/* Admin Bulk Option */}
+                {transferPreview?.isSystemAdmin && (
+                  <label className="flex items-start gap-2.5 p-3 rounded-sm border border-border hover:bg-secondary/30 cursor-pointer transition-colors">
+                    <input
+                      type="checkbox"
+                      checked={transferAllUnassigned}
+                      onChange={(e) => setTransferAllUnassigned(e.target.checked)}
+                      className="mt-0.5 h-4 w-4 rounded border-border text-signal focus:ring-signal"
+                    />
+                    <div className="text-xs space-y-0.5">
+                      <span className="font-semibold text-foreground">
+                        Include all unassigned legacy resources
+                      </span>
+                      <p className="text-[11px] text-muted-foreground">
+                        Transfer all legacy resources created by local admin (without OIDC) across
+                        the entire platform.
+                      </p>
+                    </div>
+                  </label>
+                )}
+
+                <div className="flex items-center justify-end gap-2 pt-2 border-t border-border">
+                  <button
+                    type="button"
+                    onClick={() => setShowTransferModal(false)}
+                    disabled={isTransferring}
+                    className="px-3 py-1.5 text-xs border border-border hover:bg-secondary/40 rounded-sm text-muted-foreground transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleTransferResources}
+                    disabled={isTransferring}
+                    className="flex items-center gap-2 px-4 py-1.5 text-xs bg-signal text-background font-semibold rounded-sm hover:opacity-90 transition-opacity disabled:opacity-50"
+                  >
+                    {isTransferring ? (
+                      <>
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        <span>Transferring...</span>
+                      </>
+                    ) : (
+                      <>
+                        <ArrowRightLeft className="h-3.5 w-3.5" />
+                        <span>Confirm & Transfer</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

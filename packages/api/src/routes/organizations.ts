@@ -27,6 +27,8 @@ import {
   updateOrganization,
   addOrganizationMember,
   verifyOrgAccess,
+  getUnassignedResourcesCount,
+  transferResourcesToOrganization,
   type OrgRole,
 } from '../storage/organizations.js';
 
@@ -251,5 +253,74 @@ export const organizationsRoutes: FastifyPluginAsync = async (fastify) => {
 
     await removeMember(id, memberUserId);
     return reply.send({ data: { success: true } });
+  });
+
+  /**
+   * GET /v2/organizations/:id/transfer-preview - Preview resources eligible for transfer
+   */
+  fastify.get('/organizations/:id/transfer-preview', async (request, reply) => {
+    const userId = request.user!.id;
+    const { id } = request.params as { id: string };
+
+    const hasAccess = await verifyOrgAccess(userId, id, 'admin');
+    if (!hasAccess && request.user?.role !== 'admin') {
+      return reply.status(403).send({ error: { message: 'Admin or Owner privileges required' } });
+    }
+
+    const [personal, allUnassigned] = await Promise.all([
+      getUnassignedResourcesCount(userId),
+      request.user?.role === 'admin'
+        ? getUnassignedResourcesCount(undefined)
+        : Promise.resolve(null),
+    ]);
+
+    return reply.send({
+      data: {
+        personal,
+        allUnassigned,
+        isSystemAdmin: request.user?.role === 'admin',
+      },
+    });
+  });
+
+  /**
+   * POST /v2/organizations/:id/transfer-resources - Transfer personal or unassigned resources to this team
+   */
+  fastify.post('/organizations/:id/transfer-resources', async (request, reply) => {
+    const userId = request.user!.id;
+    const { id } = request.params as { id: string };
+    const body = (request.body || {}) as { transferAllUnassigned?: boolean };
+
+    const hasAccess = await verifyOrgAccess(userId, id, 'admin');
+    if (!hasAccess && request.user?.role !== 'admin') {
+      return reply.status(403).send({ error: { message: 'Admin or Owner privileges required' } });
+    }
+
+    // Only system admin or org owner can transfer all unassigned resources across the system
+    const transferAll = Boolean(body.transferAllUnassigned);
+    if (transferAll && request.user?.role !== 'admin') {
+      const isOwner = await verifyOrgAccess(userId, id, 'owner');
+      if (!isOwner) {
+        return reply.status(403).send({
+          error: {
+            message: 'System Admin or Team Owner privileges required for bulk unassigned transfer',
+          },
+        });
+      }
+    }
+
+    const transferred = await transferResourcesToOrganization({
+      targetOrgId: id,
+      userId: transferAll ? undefined : userId,
+      transferAllUnassigned: transferAll,
+    });
+
+    return reply.send({
+      data: {
+        success: true,
+        targetOrgId: id,
+        transferred,
+      },
+    });
   });
 };

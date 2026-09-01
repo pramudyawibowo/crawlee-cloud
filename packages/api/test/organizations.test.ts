@@ -5,10 +5,16 @@ import { organizationsRoutes } from '../src/routes/organizations.js';
 import { syncUserOidcGroups } from '../src/storage/organizations.js';
 
 const mockPoolQuery = vi.fn();
+const mockClientQuery = vi.fn();
+const mockClientRelease = vi.fn();
 vi.mock('../src/db/index.js', () => ({
   pool: {
     query: (...args: unknown[]) => mockPoolQuery(...args),
   },
+  getClient: async () => ({
+    query: (...args: unknown[]) => mockClientQuery(...args),
+    release: () => mockClientRelease(),
+  }),
 }));
 
 let mockUserId = 'user-1';
@@ -37,6 +43,8 @@ describe('Organizations and Teams API', () => {
     mockUserId = 'user-1';
     mockUserRole = 'user';
     mockPoolQuery.mockReset();
+    mockClientQuery.mockReset();
+    mockClientRelease.mockReset();
   });
 
   describe('GET /v2/organizations', () => {
@@ -218,6 +226,69 @@ describe('Organizations and Teams API', () => {
       await syncUserOidcGroups('user-1', ['devops']);
 
       expect(mockPoolQuery).toHaveBeenCalled();
+    });
+  });
+
+  describe('Resource Transfer to Organization', () => {
+    it('returns preview counts for personal resources', async () => {
+      // 1. Check admin access
+      mockPoolQuery.mockResolvedValueOnce({
+        rows: [{ id: 'mem-1', org_id: 'org-1', user_id: 'user-1', role: 'admin' }],
+      });
+      // 2. Count queries for personal resources (7 queries: actors, datasets, kvs, queues, runs, schedules, webhooks)
+      mockPoolQuery
+        .mockResolvedValueOnce({ rows: [{ cnt: 3 }] }) // actors
+        .mockResolvedValueOnce({ rows: [{ cnt: 12 }] }) // datasets
+        .mockResolvedValueOnce({ rows: [{ cnt: 1 }] }) // kvs
+        .mockResolvedValueOnce({ rows: [{ cnt: 1 }] }) // queues
+        .mockResolvedValueOnce({ rows: [{ cnt: 45 }] }) // runs
+        .mockResolvedValueOnce({ rows: [{ cnt: 2 }] }) // schedules
+        .mockResolvedValueOnce({ rows: [{ cnt: 0 }] }); // webhooks
+
+      const res = await app.inject({
+        method: 'GET',
+        url: '/v2/organizations/org-1/transfer-preview',
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.data.personal.actors).toBe(3);
+      expect(body.data.personal.datasets).toBe(12);
+      expect(body.data.personal.runs).toBe(45);
+      expect(body.data.personal.schedules).toBe(2);
+    });
+
+    it('transfers personal resources to the target organization', async () => {
+      // 1. Check admin access
+      mockPoolQuery.mockResolvedValueOnce({
+        rows: [{ id: 'mem-1', org_id: 'org-1', user_id: 'user-1', role: 'owner' }],
+      });
+
+      // 2. Transaction queries on client: BEGIN, 7 UPDATEs, COMMIT
+      mockClientQuery
+        .mockResolvedValueOnce({}) // BEGIN
+        .mockResolvedValueOnce({ rowCount: 3 }) // UPDATE actors
+        .mockResolvedValueOnce({ rowCount: 12 }) // UPDATE datasets
+        .mockResolvedValueOnce({ rowCount: 1 }) // UPDATE kvs
+        .mockResolvedValueOnce({ rowCount: 1 }) // UPDATE queues
+        .mockResolvedValueOnce({ rowCount: 45 }) // UPDATE runs
+        .mockResolvedValueOnce({ rowCount: 2 }) // UPDATE schedules
+        .mockResolvedValueOnce({ rowCount: 0 }) // UPDATE webhooks
+        .mockResolvedValueOnce({}); // COMMIT
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/v2/organizations/org-1/transfer-resources',
+        payload: {},
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.data.success).toBe(true);
+      expect(body.data.transferred.actors).toBe(3);
+      expect(body.data.transferred.datasets).toBe(12);
+      expect(body.data.transferred.runs).toBe(45);
+      expect(body.data.transferred.schedules).toBe(2);
     });
   });
 });

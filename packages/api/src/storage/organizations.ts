@@ -6,7 +6,7 @@
  */
 
 import { nanoid } from 'nanoid';
-import { pool } from '../db/index.js';
+import { pool, getClient } from '../db/index.js';
 
 export type OrgRole = 'owner' | 'admin' | 'member' | 'viewer';
 
@@ -304,5 +304,124 @@ export async function syncUserOidcGroups(userId: string, groupNames: string[]): 
         err
       );
     }
+  }
+}
+
+export interface TransferResourcesResult {
+  actors: number;
+  datasets: number;
+  keyValueStores: number;
+  requestQueues: number;
+  runs: number;
+  schedules: number;
+  webhooks: number;
+}
+
+/**
+ * Count unassigned resources available for transfer.
+ */
+export async function getUnassignedResourcesCount(
+  userId?: string
+): Promise<TransferResourcesResult> {
+  const whereClause = userId ? 'WHERE org_id IS NULL AND user_id = $1' : 'WHERE org_id IS NULL';
+  const params = userId ? [userId] : [];
+
+  const [a, d, k, q, r, s, w] = await Promise.all([
+    pool.query<{ cnt: number }>(`SELECT COUNT(*)::int AS cnt FROM actors ${whereClause}`, params),
+    pool.query<{ cnt: number }>(`SELECT COUNT(*)::int AS cnt FROM datasets ${whereClause}`, params),
+    pool.query<{ cnt: number }>(
+      `SELECT COUNT(*)::int AS cnt FROM key_value_stores ${whereClause}`,
+      params
+    ),
+    pool.query<{ cnt: number }>(
+      `SELECT COUNT(*)::int AS cnt FROM request_queues ${whereClause}`,
+      params
+    ),
+    pool.query<{ cnt: number }>(`SELECT COUNT(*)::int AS cnt FROM runs ${whereClause}`, params),
+    pool.query<{ cnt: number }>(
+      `SELECT COUNT(*)::int AS cnt FROM schedules ${whereClause}`,
+      params
+    ),
+    pool.query<{ cnt: number }>(`SELECT COUNT(*)::int AS cnt FROM webhooks ${whereClause}`, params),
+  ]);
+
+  return {
+    actors: a.rows[0]?.cnt ?? 0,
+    datasets: d.rows[0]?.cnt ?? 0,
+    keyValueStores: k.rows[0]?.cnt ?? 0,
+    requestQueues: q.rows[0]?.cnt ?? 0,
+    runs: r.rows[0]?.cnt ?? 0,
+    schedules: s.rows[0]?.cnt ?? 0,
+    webhooks: w.rows[0]?.cnt ?? 0,
+  };
+}
+
+/**
+ * Transfer personal / unassigned resources to a target organization.
+ */
+export async function transferResourcesToOrganization(params: {
+  targetOrgId: string;
+  userId?: string;
+  transferAllUnassigned?: boolean;
+}): Promise<TransferResourcesResult> {
+  const { targetOrgId, userId, transferAllUnassigned } = params;
+
+  let whereClause = 'org_id IS NULL';
+  const queryParams: unknown[] = [targetOrgId];
+
+  if (!transferAllUnassigned && userId) {
+    whereClause += ' AND user_id = $2';
+    queryParams.push(userId);
+  }
+
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+
+    const updateActors = await client.query(
+      `UPDATE actors SET org_id = $1 WHERE ${whereClause} RETURNING id`,
+      queryParams
+    );
+    const updateDatasets = await client.query(
+      `UPDATE datasets SET org_id = $1 WHERE ${whereClause} RETURNING id`,
+      queryParams
+    );
+    const updateKvs = await client.query(
+      `UPDATE key_value_stores SET org_id = $1 WHERE ${whereClause} RETURNING id`,
+      queryParams
+    );
+    const updateQueues = await client.query(
+      `UPDATE request_queues SET org_id = $1 WHERE ${whereClause} RETURNING id`,
+      queryParams
+    );
+    const updateRuns = await client.query(
+      `UPDATE runs SET org_id = $1 WHERE ${whereClause} RETURNING id`,
+      queryParams
+    );
+    const updateSchedules = await client.query(
+      `UPDATE schedules SET org_id = $1 WHERE ${whereClause} RETURNING id`,
+      queryParams
+    );
+    const updateWebhooks = await client.query(
+      `UPDATE webhooks SET org_id = $1 WHERE ${whereClause} RETURNING id`,
+      queryParams
+    );
+
+    await client.query('COMMIT');
+
+    return {
+      actors: updateActors.rowCount ?? 0,
+      datasets: updateDatasets.rowCount ?? 0,
+      keyValueStores: updateKvs.rowCount ?? 0,
+      requestQueues: updateQueues.rowCount ?? 0,
+      runs: updateRuns.rowCount ?? 0,
+      schedules: updateSchedules.rowCount ?? 0,
+      webhooks: updateWebhooks.rowCount ?? 0,
+    };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
   }
 }

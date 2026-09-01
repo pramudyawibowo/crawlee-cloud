@@ -1461,3 +1461,39 @@ export async function removeOrgMember(orgId: string, memberUserId: string): Prom
     method: 'DELETE',
   });
 }
+
+export interface TransferredResourcesSummary {
+  actors: number;
+  datasets: number;
+  keyValueStores: number;
+  requestQueues: number;
+  runs: number;
+  schedules: number;
+  webhooks: number;
+}
+
+export interface TransferPreviewData {
+  personal: TransferredResourcesSummary;
+  allUnassigned: TransferredResourcesSummary | null;
+  isSystemAdmin: boolean;
+}
+
+export async function getTransferPreview(orgId: string): Promise<TransferPreviewData> {
+  const res = await fetchApi<{ data: TransferPreviewData }>(
+    `/v2/organizations/${orgId}/transfer-preview`
+  );
+  return res.data;
+}
+
+export async function transferResourcesToOrg(
+  orgId: string,
+  options?: { transferAllUnassigned?: boolean }
+): Promise<{ success: boolean; targetOrgId: string; transferred: TransferredResourcesSummary }> {
+  const res = await fetchApi<{
+    data: { success: boolean; targetOrgId: string; transferred: TransferredResourcesSummary };
+  }>(`/v2/organizations/${orgId}/transfer-resources`, {
+    method: 'POST',
+    body: JSON.stringify(options || {}),
+  });
+  return res.data;
+}
