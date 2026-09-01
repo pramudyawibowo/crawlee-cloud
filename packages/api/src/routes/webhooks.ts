@@ -9,6 +9,12 @@ import { query } from '../db/index.js';
 import { appendSearchCondition } from '../db/search.js';
 import { authenticate } from '../auth/middleware.js';
 import { applyWebhookTemplate } from '../webhooks/apply-template.js';
+import {
+  getRequestWorkspace,
+  requireWorkspaceRole,
+  buildWorkspaceWhere,
+  buildResourceAccessWhere,
+} from '../auth/workspace.js';
 
 /**
  * Redaction + length cap for the rendered webhook body before persisting
@@ -56,6 +62,7 @@ function walkAndRedact(node: unknown): unknown {
 interface WebhookRow {
   id: string;
   user_id: string;
+  org_id: string | null;
   event_types: string[];
   request_url: string;
   payload_template: string | null;
@@ -102,15 +109,18 @@ export const webhooksRoutes: FastifyPluginAsync = async (fastify) => {
     };
   }>('/webhooks', async (request, reply) => {
     const data = CreateWebhookSchema.parse(request.body);
+    const ws = await getRequestWorkspace(request);
+    await requireWorkspaceRole(request, ws.orgId, 'member');
 
     const id = nanoid();
     const result = await query<WebhookRow>(
-      `INSERT INTO webhooks (id, user_id, event_types, request_url, payload_template, actor_id, headers, description, is_enabled)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `INSERT INTO webhooks (id, user_id, org_id, event_types, request_url, payload_template, actor_id, headers, description, is_enabled)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        RETURNING *`,
       [
         id,
         request.user!.id,
+        ws.orgId || null,
         data.eventTypes,
         data.requestUrl,
         data.payloadTemplate ?? null,
@@ -196,21 +206,16 @@ export const webhooksRoutes: FastifyPluginAsync = async (fastify) => {
     // Webhooks have no `name` column — search instead matches against id,
     // description, and request_url so operators can find a hook by what
     // they typed in the description field or by domain.
-    const params: unknown[] = [request.user!.id];
-    let where = `user_id = $1 AND ${scopeClause}`;
+    const ws = await getRequestWorkspace(request);
+    const params: unknown[] = [];
+    const wsWhere = buildWorkspaceWhere(ws, request.user!.id, params);
+    let where = `${wsWhere} AND ${scopeClause}`;
 
     if (request.query.runId) {
       params.push(request.query.runId);
       where += ` AND run_id = $${params.length}`;
     }
     if (request.query.runActorId) {
-      // Subquery (not JOIN) keeps the row shape clean — no risk of
-      // duplicating webhook rows if multiple runs of the same actor
-      // somehow shared a webhook (they can't today, but the constraint
-      // is a UNIQUE on runs.id, not on the subquery result). Postgres
-      // turns this into a semi-join either way. user_id scope on the
-      // subquery prevents leaking webhooks for runs of other users'
-      // actors via a guessed runActorId.
       params.push(request.query.runActorId);
       where += ` AND run_id IN (SELECT id FROM runs WHERE user_id = $1 AND actor_id = $${params.length})`;
     }
@@ -248,14 +253,17 @@ export const webhooksRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   /**
-   * GET /v2/webhooks/:webhookId - Get single webhook (user-scoped)
+   * GET /v2/webhooks/:webhookId - Get single webhook (user or team scoped)
    */
   fastify.get<{ Params: { webhookId: string } }>('/webhooks/:webhookId', async (request, reply) => {
     const { webhookId } = request.params;
+    const isAdmin = request.user?.role === 'admin';
+    const params: unknown[] = [webhookId];
+    const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, params);
 
     const result = await query<WebhookRow>(
-      'SELECT * FROM webhooks WHERE id = $1 AND user_id = $2',
-      [webhookId, request.user!.id]
+      `SELECT * FROM webhooks WHERE id = $1 AND ${accessWhere}`,
+      params
     );
 
     if (!result.rows[0]) {
@@ -267,7 +275,7 @@ export const webhooksRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   /**
-   * PUT /v2/webhooks/:webhookId - Update webhook (user-scoped)
+   * PUT /v2/webhooks/:webhookId - Update webhook (user or team scoped)
    */
   fastify.put<{
     Params: { webhookId: string };
@@ -283,6 +291,7 @@ export const webhooksRoutes: FastifyPluginAsync = async (fastify) => {
   }>('/webhooks/:webhookId', async (request, reply) => {
     const { webhookId } = request.params;
     const updates = UpdateWebhookSchema.parse(request.body);
+    const isAdmin = request.user?.role === 'admin';
 
     const setClauses: string[] = ['modified_at = NOW()'];
     const values: unknown[] = [];
@@ -318,18 +327,12 @@ export const webhooksRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     values.push(webhookId);
+    const webhookIdParam = paramIndex++;
+    const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, values);
 
-    // Add user_id filter for authorization
-    values.push(request.user!.id);
-    // `run_id IS NULL` rejects updates to per-run webhooks: they're
-    // immutable post-dispatch and would race with delivery if mutated.
-    // The 0-row RETURNING falls through to the existing 404 path — same
-    // shape as "wrong owner" or "missing", which is fine: per-run rows
-    // are an internal mechanism, not a separate user-facing resource.
-    // (DELETE allows per-run rows on purpose — see comment below.)
     const result = await query<WebhookRow>(
       `UPDATE webhooks SET ${setClauses.join(', ')}
-       WHERE id = $${paramIndex} AND user_id = $${paramIndex + 1}
+       WHERE id = $${webhookIdParam} AND ${accessWhere}
          AND run_id IS NULL
        RETURNING *`,
       values
@@ -344,21 +347,19 @@ export const webhooksRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   /**
-   * DELETE /v2/webhooks/:webhookId - Delete webhook (user-scoped)
+   * DELETE /v2/webhooks/:webhookId - Delete webhook (user or team scoped)
    */
   fastify.delete<{ Params: { webhookId: string } }>(
     '/webhooks/:webhookId',
     async (request, reply) => {
       const { webhookId } = request.params;
-      // Per-run webhooks (run_id IS NOT NULL) ARE allowed to be deleted —
-      // this is an explicit "cancel pending deliveries" affordance for
-      // operators. The CASCADE on runs deletion handles the common case;
-      // manual DELETE is the rare-but-useful escape hatch. Inverse decision
-      // vs. PUT (which is rejected) because DELETE is unambiguous in intent
-      // while PUT could accidentally race with delivery.
+      const isAdmin = request.user?.role === 'admin';
+      const params: unknown[] = [webhookId];
+      const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, params);
+
       const result = await query(
-        'DELETE FROM webhooks WHERE id = $1 AND user_id = $2 RETURNING id',
-        [webhookId, request.user!.id]
+        `DELETE FROM webhooks WHERE id = $1 AND ${accessWhere} RETURNING id`,
+        params
       );
 
       if (result.rowCount === 0) {
@@ -371,7 +372,7 @@ export const webhooksRoutes: FastifyPluginAsync = async (fastify) => {
   );
 
   /**
-   * GET /v2/webhooks/:webhookId/deliveries - List delivery history (user-scoped, paginated)
+   * GET /v2/webhooks/:webhookId/deliveries - List delivery history (user or team scoped, paginated)
    */
   fastify.get<{
     Params: { webhookId: string };
@@ -381,10 +382,13 @@ export const webhooksRoutes: FastifyPluginAsync = async (fastify) => {
     const offset = Math.max(0, parseInt(request.query.offset || '0', 10) || 0);
     const limit = Math.min(1000, Math.max(1, parseInt(request.query.limit || '100', 10) || 100));
 
-    // Verify webhook ownership
+    const isAdmin = request.user?.role === 'admin';
+    const params: unknown[] = [webhookId];
+    const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, params);
+
     const webhook = await query<WebhookRow>(
-      'SELECT * FROM webhooks WHERE id = $1 AND user_id = $2',
-      [webhookId, request.user!.id]
+      `SELECT * FROM webhooks WHERE id = $1 AND ${accessWhere}`,
+      params
     );
 
     if (!webhook.rows[0]) {
@@ -417,32 +421,19 @@ export const webhooksRoutes: FastifyPluginAsync = async (fastify) => {
 
   /**
    * POST /v2/webhooks/:webhookId/test
-   *
-   * Fire a synthetic event at the webhook's configured URL — one shot, no
-   * retries, 10s timeout. Records a row in `webhook_deliveries` with the
-   * outcome so the test shows up in the same history the dashboard already
-   * displays. The synthetic payload sets `test: true` and uses sentinel run
-   * IDs so receivers can opt-out of side effects.
-   *
-   * Body (all optional):
-   *   - eventType: string — pick a specific event the webhook is subscribed
-   *     to. Useful when receivers branch by event (e.g. SUCCEEDED routes to
-   *     a queue, FAILED posts to Slack). When omitted, defaults to the
-   *     first configured event. To exercise *every* subscribed event the
-   *     dashboard makes one parallel call per event with this field set.
-   *
-   * Synchronous: the response includes the delivery row so the UI can show
-   * the result immediately without polling.
    */
   fastify.post<{
     Params: { webhookId: string };
     Body: { eventType?: string } | undefined;
   }>('/webhooks/:webhookId/test', async (request, reply) => {
     const { webhookId } = request.params;
+    const isAdmin = request.user?.role === 'admin';
+    const params: unknown[] = [webhookId];
+    const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, params);
 
     const webhookResult = await query<WebhookRow>(
-      'SELECT * FROM webhooks WHERE id = $1 AND user_id = $2',
-      [webhookId, request.user!.id]
+      `SELECT * FROM webhooks WHERE id = $1 AND ${accessWhere}`,
+      params
     );
     const webhook = webhookResult.rows[0];
     if (!webhook) {

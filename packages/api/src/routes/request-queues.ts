@@ -28,11 +28,18 @@ import {
   UpdateRequestSchema,
   LockSecsSchema,
 } from '../schemas/request-queues.js';
+import {
+  getRequestWorkspace,
+  requireWorkspaceRole,
+  buildWorkspaceWhere,
+  buildResourceAccessWhere,
+} from '../auth/workspace.js';
 
 interface QueueRow {
   id: string;
   name: string | null;
   user_id: string | null;
+  org_id: string | null;
   created_at: Date;
   modified_at: Date;
   accessed_at: Date;
@@ -60,11 +67,60 @@ interface RequestRow {
   locked_by: string | null;
 }
 
+async function resolveQueue(
+  queueId: string,
+  user: { id: string; role?: string }
+): Promise<QueueRow | null> {
+  const isAdmin = user.role === 'admin';
+  const params: unknown[] = [queueId, queueId];
+  const accessWhere = buildResourceAccessWhere(user.id, isAdmin, params);
+  const queue = await query<QueueRow>(
+    `SELECT * FROM request_queues WHERE (id = $1 OR name = $2) AND ${accessWhere}`,
+    params
+  );
+  return queue.rows[0] || null;
+}
+
+async function getOrCreateQueue(
+  queueId: string,
+  user: { id: string; role?: string },
+  orgId?: string | null
+): Promise<QueueRow | null> {
+  const isAdmin = user.role === 'admin';
+  const params: unknown[] = [queueId, queueId];
+  const accessWhere = buildResourceAccessWhere(user.id, isAdmin, params);
+  let queue = await query<QueueRow>(
+    `SELECT * FROM request_queues WHERE (id = $1 OR name = $2) AND ${accessWhere}`,
+    params
+  );
+  if (!queue.rows[0]) {
+    const id = queueId === 'default' ? nanoid() : queueId;
+    if (orgId) {
+      await query(
+        `INSERT INTO request_queues (id, name, user_id, org_id) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
+        [id, queueId === 'default' ? null : queueId, user.id, orgId]
+      );
+    } else {
+      await query(
+        `INSERT INTO request_queues (id, name, user_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+        [id, queueId === 'default' ? null : queueId, user.id]
+      );
+    }
+    const recheckParams: unknown[] = [id, id];
+    const recheckAccess = buildResourceAccessWhere(user.id, isAdmin, recheckParams);
+    queue = await query<QueueRow>(
+      `SELECT * FROM request_queues WHERE (id = $1 OR name = $2) AND ${recheckAccess}`,
+      recheckParams
+    );
+  }
+  return queue.rows[0] || null;
+}
+
 export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.addHook('preHandler', authenticate);
 
   /**
-   * GET /v2/request-queues - List queues (user-scoped)
+   * GET /v2/request-queues - List queues (workspace-scoped)
    */
   fastify.get<{
     Querystring: { offset?: string; limit?: string; q?: string };
@@ -72,11 +128,10 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
     const offset = Math.max(0, parseInt(request.query.offset || '0', 10) || 0);
     const limit = Math.min(1000, Math.max(1, parseInt(request.query.limit || '100', 10) || 100));
 
-    const params: unknown[] = [request.user!.id];
-    const where = appendSearchCondition('user_id = $1', params, request.query.q || '', [
-      'id',
-      'name',
-    ]);
+    const ws = await getRequestWorkspace(request);
+    const params: unknown[] = [];
+    const wsWhere = buildWorkspaceWhere(ws, request.user!.id, params);
+    const where = appendSearchCondition(wsWhere, params, request.query.q || '', ['id', 'name']);
 
     const [countResult, pageResult] = await Promise.all([
       query<{ total: string }>(
@@ -105,7 +160,7 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   /**
-   * POST /v2/request-queues - Create or get queue (user-scoped)
+   * POST /v2/request-queues - Create or get queue (workspace-scoped)
    */
   fastify.post<{ Body: { name?: string }; Querystring: { name?: string } }>(
     '/request-queues',
@@ -113,11 +168,21 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
       const body = CreateQueueSchema.parse(request.body || {});
       const name = request.query.name ?? body.name;
 
+      const ws = await getRequestWorkspace(request);
+      await requireWorkspaceRole(request, ws.orgId, 'member');
+
       if (name) {
-        const existing = await query<QueueRow>(
-          'SELECT * FROM request_queues WHERE name = $1 AND user_id = $2',
-          [name, request.user!.id]
-        );
+        let existingQuery = '';
+        let existingParams: unknown[] = [];
+        if (ws.orgId) {
+          existingQuery = 'SELECT * FROM request_queues WHERE name = $1 AND org_id = $2';
+          existingParams = [name, ws.orgId];
+        } else {
+          existingQuery =
+            'SELECT * FROM request_queues WHERE name = $1 AND org_id IS NULL AND user_id = $2';
+          existingParams = [name, request.user!.id];
+        }
+        const existing = await query<QueueRow>(existingQuery, existingParams);
         if (existing.rows[0]) {
           return { data: formatQueue(existing.rows[0]) };
         }
@@ -125,8 +190,8 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
 
       const id = nanoid();
       const result = await query<QueueRow>(
-        `INSERT INTO request_queues (id, name, user_id) VALUES ($1, $2, $3) RETURNING *`,
-        [id, name ?? null, request.user!.id]
+        `INSERT INTO request_queues (id, name, user_id, org_id) VALUES ($1, $2, $3, $4) RETURNING *`,
+        [id, name ?? null, request.user!.id, ws.orgId || null]
       );
 
       reply.status(201);
@@ -140,41 +205,39 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
   );
 
   /**
-   * GET /v2/request-queues/:queueId - Get queue info (user-scoped)
+   * GET /v2/request-queues/:queueId - Get queue info (user or team scoped)
    */
   fastify.get<{ Params: { queueId: string } }>(
     '/request-queues/:queueId',
     async (request, reply) => {
       const { queueId } = request.params;
 
-      const result = await query<QueueRow>(
-        'SELECT * FROM request_queues WHERE (id = $1 OR name = $2) AND user_id = $3',
-        [queueId, queueId, request.user!.id]
-      );
-
-      if (!result.rows[0]) {
+      const queue = await resolveQueue(queueId, request.user!);
+      if (!queue) {
         reply.status(404);
         return { error: { type: 'record-not-found', message: 'Request queue not found' } };
       }
 
-      await query('UPDATE request_queues SET accessed_at = NOW() WHERE id = $1', [
-        result.rows[0].id,
-      ]);
+      await query('UPDATE request_queues SET accessed_at = NOW() WHERE id = $1', [queue.id]);
 
-      return { data: formatQueue(result.rows[0]) };
+      return { data: formatQueue(queue) };
     }
   );
 
   /**
-   * DELETE /v2/request-queues/:queueId - Delete queue (user-scoped)
+   * DELETE /v2/request-queues/:queueId - Delete queue (user or team scoped)
    */
   fastify.delete<{ Params: { queueId: string } }>(
     '/request-queues/:queueId',
     async (request, reply) => {
       const { queueId } = request.params;
-      const result = await query(
-        'DELETE FROM request_queues WHERE (id = $1 OR name = $2) AND user_id = $3 RETURNING id',
-        [queueId, queueId, request.user!.id]
+      const isAdmin = request.user?.role === 'admin';
+      const params: unknown[] = [queueId, queueId];
+      const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, params);
+
+      const result = await query<{ id: string }>(
+        `DELETE FROM request_queues WHERE (id = $1 OR name = $2) AND ${accessWhere} RETURNING id`,
+        params
       );
       if (result.rowCount === 0) {
         reply.status(404);
@@ -185,7 +248,7 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
   );
 
   /**
-   * GET /v2/request-queues/:queueId/head - Get queue head (next requests to process, user-scoped)
+   * GET /v2/request-queues/:queueId/head - Get queue head (next requests to process, user or team scoped)
    */
   fastify.get<{
     Params: { queueId: string };
@@ -194,12 +257,9 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
     const { queueId } = request.params;
     const limit = Math.min(1000, Math.max(1, parseInt(request.query.limit || '100', 10) || 100));
 
-    const queue = await query<QueueRow>(
-      'SELECT * FROM request_queues WHERE (id = $1 OR name = $2) AND user_id = $3',
-      [queueId, queueId, request.user!.id]
-    );
+    const queue = await resolveQueue(queueId, request.user!);
 
-    if (!queue.rows[0]) {
+    if (!queue) {
       reply.status(404);
       return { error: { type: 'record-not-found', message: 'Request queue not found' } };
     }
@@ -214,13 +274,13 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
       ORDER BY order_no ASC
       LIMIT $2
     `,
-      [queue.rows[0].id, limit]
+      [queue.id, limit]
     );
 
     return {
       data: {
         limit,
-        queueModifiedAt: queue.rows[0].modified_at,
+        queueModifiedAt: queue.modified_at,
         items: requests.rows.map(formatRequest),
       },
     };
@@ -241,17 +301,14 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
     const limit = Math.min(1000, Math.max(1, parseInt(request.query.limit ?? '25', 10) || 25));
     const clientKey = request.query.clientKey ?? nanoid();
 
-    const queue = await query<QueueRow>(
-      'SELECT * FROM request_queues WHERE (id = $1 OR name = $2) AND user_id = $3',
-      [queueId, queueId, request.user!.id]
-    );
+    const queue = await resolveQueue(queueId, request.user!);
 
-    if (!queue.rows[0]) {
+    if (!queue) {
       reply.status(404);
       return { error: { type: 'record-not-found', message: 'Request queue not found' } };
     }
 
-    const qId = queue.rows[0].id;
+    const qId = queue.id;
 
     // Get pending, unlocked requests
     const requests = await query<RequestRow>(
@@ -286,16 +343,6 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     // Check if queue has any actively-locked, *unhandled* requests.
-    //
-    // The handled_at IS NULL clause is load-bearing two ways:
-    //   1. Correctness — a handled request that still carries a stale
-    //      locked_until is a leftover ghost; counting it as "actively
-    //      locked" misleads the SDK's distributed-crawl bookkeeping.
-    //   2. Performance — together with locked_until, this matches the
-    //      partial idx_requests_locked (queue_id, locked_until)
-    //      WHERE handled_at IS NULL. Without the filter, the planner
-    //      can't prove all matching rows live in the partial index and
-    //      falls back to seq scan as the table grows.
     const lockedCheck = await query<{ count: string }>(
       `
       SELECT COUNT(*) as count FROM requests
@@ -306,8 +353,6 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
     const queueHasLockedRequests = parseInt(lockedCheck.rows[0]?.count ?? '0', 10) > 0;
 
     // Update hadMultipleClients if there are multiple client keys.
-    // Same handled_at IS NULL filter as above for the same two reasons —
-    // a handled request shouldn't be considered an active client.
     const clientsCheck = await query<{ count: string }>(
       `
       SELECT COUNT(DISTINCT locked_by) as count FROM requests
@@ -317,7 +362,7 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
     );
     const hadMultipleClients = parseInt(clientsCheck.rows[0]?.count ?? '0', 10) > 1;
 
-    if (hadMultipleClients && !queue.rows[0].had_multiple_clients) {
+    if (hadMultipleClients && !queue.had_multiple_clients) {
       await query('UPDATE request_queues SET had_multiple_clients = true WHERE id = $1', [qId]);
     }
 
@@ -326,9 +371,9 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
         limit,
         lockSecs,
         clientKey,
-        queueModifiedAt: queue.rows[0].modified_at,
+        queueModifiedAt: queue.modified_at,
         queueHasLockedRequests,
-        hadMultipleClients: queue.rows[0].had_multiple_clients || hadMultipleClients,
+        hadMultipleClients: queue.had_multiple_clients || hadMultipleClients,
         items: lockedRequests.map((req) => ({
           ...formatRequest(req),
           lockExpiresAt,
@@ -359,25 +404,13 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
     const forefront = request.query.forefront === 'true';
     const body = AddRequestSchema.parse(request.body);
 
-    // Get or create queue (user-scoped)
-    let queue = await query<QueueRow>(
-      'SELECT * FROM request_queues WHERE (id = $1 OR name = $2) AND user_id = $3',
-      [queueId, queueId, request.user!.id]
-    );
-
-    if (!queue.rows[0]) {
-      const id = queueId === 'default' ? nanoid() : queueId;
-      await query(
-        `INSERT INTO request_queues (id, name, user_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
-        [id, queueId === 'default' ? null : queueId, request.user!.id]
-      );
-      queue = await query<QueueRow>('SELECT * FROM request_queues WHERE id = $1 AND user_id = $2', [
-        id,
-        request.user!.id,
-      ]);
+    const queue = await getOrCreateQueue(queueId, request.user!);
+    if (!queue) {
+      reply.status(404);
+      return { error: { type: 'record-not-found', message: 'Request queue not found' } };
     }
 
-    const qId = queue.rows[0]!.id;
+    const qId = queue.id;
 
     // Generate uniqueKey from URL if not provided
     const uniqueKey =
@@ -386,14 +419,6 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
     // For forefront, use negative order_no to put at front
     const orderModifier = forefront ? -1 : 1;
 
-    // INSERT ... ON CONFLICT DO NOTHING is the race-free shape: under
-    // concurrent callers with the same uniqueKey, the unique
-    // (queue_id, unique_key) constraint serializes them, exactly one wins
-    // the insert, and the rest get an empty RETURNING row instead of a
-    // 500-throwing constraint violation. The pre-fix shape was
-    // SELECT-then-INSERT with no transaction, which under load lost ~5%
-    // of concurrent same-key calls to constraint errors (confirmed in
-    // slice #1 stress: 5/100 errors at 100-way concurrency).
     const id = nanoid();
     const insertResult = await query<RequestRow>(
       `
@@ -415,9 +440,6 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
       ]
     );
 
-    // Empty RETURNING ⇒ row already existed (concurrent insert won, or it
-    // was inserted earlier). Re-fetch to return wasAlreadyPresent=true with
-    // the existing row's id and handled state.
     if (!insertResult.rows[0]) {
       const existing = await query<RequestRow>(
         'SELECT * FROM requests WHERE queue_id = $1 AND unique_key = $2',
@@ -432,8 +454,6 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
           },
         };
       }
-      // Vanishingly rare: row neither inserted nor existing. Treat as a
-      // transient failure and return 500. Caller can retry idempotently.
       reply.status(500);
       return { error: { type: 'internal-error', message: 'Failed to add request' } };
     }
@@ -477,7 +497,6 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
     const _forefront = request.query.forefront === 'true';
     let body = request.body;
 
-    // Handle Buffer body from content-type parser
     if (Buffer.isBuffer(body)) {
       const bufferContent = body.toString('utf-8');
       try {
@@ -489,25 +508,12 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
 
     const requests = BatchAddRequestSchema.parse(Array.isArray(body) ? body : []);
 
-    // Get or create queue (user-scoped)
-    let queue = await query<QueueRow>(
-      'SELECT * FROM request_queues WHERE (id = $1 OR name = $2) AND user_id = $3',
-      [queueId, queueId, request.user!.id]
-    );
-
-    if (!queue.rows[0]) {
-      const id = queueId === 'default' ? nanoid() : queueId;
-      await query(
-        `INSERT INTO request_queues (id, name, user_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
-        [id, queueId === 'default' ? null : queueId, request.user!.id]
-      );
-      queue = await query<QueueRow>('SELECT * FROM request_queues WHERE id = $1 AND user_id = $2', [
-        id,
-        request.user!.id,
-      ]);
+    const queue = await getOrCreateQueue(queueId, request.user!);
+    if (!queue) {
+      return { data: { processedRequests: [], unprocessedRequests: [] } };
     }
 
-    const qId = queue.rows[0]!.id;
+    const qId = queue.id;
     const processedRequests: {
       requestId: string;
       uniqueKey: string;
@@ -641,14 +647,17 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
     '/request-queues/:queueId/requests/:requestId',
     async (request, reply) => {
       const { queueId, requestId } = request.params;
+      const isAdmin = request.user?.role === 'admin';
+      const params: unknown[] = [queueId, requestId];
+      const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, params, 'q');
 
       const result = await query<RequestRow>(
         `
         SELECT r.* FROM requests r
         JOIN request_queues q ON r.queue_id = q.id
-        WHERE (q.id = $1 OR q.name = $1) AND r.id = $2 AND q.user_id = $3
+        WHERE (q.id = $1 OR q.name = $1) AND r.id = $2 AND ${accessWhere}
       `,
-        [queueId, requestId, request.user!.id]
+        params
       );
 
       if (!result.rows[0]) {
@@ -679,14 +688,18 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
     const updates = UpdateRequestSchema.parse(request.body);
     const _forefront = request.query.forefront === 'true';
     const clientKey = request.query.clientKey;
+    const isAdmin = request.user?.role === 'admin';
+
+    const checkParams: unknown[] = [queueId, requestId];
+    const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, checkParams, 'q');
 
     const existingResult = await query<RequestRow>(
       `
       SELECT r.* FROM requests r
       JOIN request_queues q ON r.queue_id = q.id
-      WHERE (q.id = $1 OR q.name = $1) AND r.id = $2 AND q.user_id = $3
+      WHERE (q.id = $1 OR q.name = $1) AND r.id = $2 AND ${accessWhere}
     `,
-      [queueId, requestId, request.user!.id]
+      checkParams
     );
 
     if (!existingResult.rows[0]) {
@@ -779,12 +792,9 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
     const lockSecs = LockSecsSchema.parse(request.query.lockSecs);
     const clientKey = request.query.clientKey ?? '';
 
-    const queue = await query<QueueRow>(
-      'SELECT * FROM request_queues WHERE (id = $1 OR name = $2) AND user_id = $3',
-      [queueId, queueId, request.user!.id]
-    );
+    const queue = await resolveQueue(queueId, request.user!);
 
-    if (!queue.rows[0]) {
+    if (!queue) {
       reply.status(404);
       return { error: { type: 'record-not-found', message: 'Request queue not found' } };
     }
@@ -792,7 +802,7 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
     // Check request exists
     const req = await query<RequestRow>('SELECT * FROM requests WHERE id = $1 AND queue_id = $2', [
       requestId,
-      queue.rows[0].id,
+      queue.id,
     ]);
 
     if (!req.rows[0]) {
@@ -801,7 +811,7 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     // Prolong in Redis
-    await lockRequest(queue.rows[0].id, requestId, clientKey, lockSecs);
+    await lockRequest(queue.id, requestId, clientKey, lockSecs);
 
     await query(
       `
@@ -825,18 +835,15 @@ export const requestQueuesRoutes: FastifyPluginAsync = async (fastify) => {
     const { queueId, requestId } = request.params;
     const { clientKey = '', forefront: _forefront } = request.query;
 
-    const queue = await query<QueueRow>(
-      'SELECT * FROM request_queues WHERE (id = $1 OR name = $2) AND user_id = $3',
-      [queueId, queueId, request.user!.id]
-    );
+    const queue = await resolveQueue(queueId, request.user!);
 
-    if (!queue.rows[0]) {
+    if (!queue) {
       reply.status(404);
       return { error: { type: 'record-not-found', message: 'Request queue not found' } };
     }
 
     // Release in Redis
-    await releaseLock(queue.rows[0].id, requestId, clientKey);
+    await releaseLock(queue.id, requestId, clientKey);
 
     // Clear in DB
     await query(

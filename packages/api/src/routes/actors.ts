@@ -10,16 +10,23 @@ import {
   ActorRunSchema,
   DeleteActorQuerySchema,
 } from '../schemas/actors.js';
-import { query, getClient } from '../db/index.js';
+import { query } from '../db/index.js';
 import { encryptProxyPassword } from '../lib/proxy-crypto.js';
 import { appendSearchCondition } from '../db/search.js';
 import { redis } from '../storage/redis.js';
 import { authenticate } from '../auth/middleware.js';
+import {
+  getRequestWorkspace,
+  requireWorkspaceRole,
+  buildWorkspaceWhere,
+  buildResourceAccessWhere,
+} from '../auth/workspace.js';
 
 interface ActorRow {
   id: string;
   name: string;
   user_id: string | null;
+  org_id: string | null;
   title: string | null;
   description: string | null;
   default_run_options: Record<string, unknown> | null;
@@ -175,8 +182,10 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
     const offset = Math.max(0, parseInt(request.query.offset || '0', 10) || 0);
     const limit = Math.min(1000, Math.max(1, parseInt(request.query.limit || '100', 10) || 100));
 
-    const params: unknown[] = [request.user!.id];
-    const where = appendSearchCondition('user_id = $1', params, request.query.q || '', [
+    const ws = await getRequestWorkspace(request);
+    const params: unknown[] = [];
+    const wsWhere = buildWorkspaceWhere(ws, request.user!.id, params);
+    const where = appendSearchCondition(wsWhere, params, request.query.q || '', [
       'id',
       'name',
       'title',
@@ -234,6 +243,9 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
       proxyPassword,
     } = CreateActorSchema.parse(request.body);
 
+    const ws = await getRequestWorkspace(request);
+    await requireWorkspaceRole(request, ws.orgId, 'member');
+
     // Three-state proxyPassword semantics matching PUT /v2/acts/:id:
     //   undefined → preserve existing (update) / null on insert
     //   null      → explicit clear
@@ -241,14 +253,20 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
     const encryptIfSet = (v: string | null | undefined): string | null | undefined =>
       v === undefined ? undefined : v === null ? null : encryptProxyPassword(v);
 
-    // Check if actor with this name already exists for this user
-    const existing = await query<ActorRow>(
-      'SELECT * FROM actors WHERE name = $1 AND user_id = $2',
-      [name, request.user!.id]
-    );
+    // Check if actor with this name already exists in this workspace
+    let existingQuery = '';
+    let existingParams: unknown[] = [];
+    if (ws.orgId) {
+      existingQuery = 'SELECT * FROM actors WHERE name = $1 AND org_id = $2';
+      existingParams = [name, ws.orgId];
+    } else {
+      existingQuery = 'SELECT * FROM actors WHERE name = $1 AND org_id IS NULL AND user_id = $2';
+      existingParams = [name, request.user!.id];
+    }
+    const existing = await query<ActorRow>(existingQuery, existingParams);
 
     if (existing.rows[0]) {
-      // Update existing actor (user_id already verified in SELECT)
+      // Update existing actor
       const proxyParam = encryptIfSet(proxyPassword);
       const result = await query<ActorRow>(
         `
@@ -256,7 +274,7 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
         SET title = $1, description = $2, default_run_options = $3,
             max_retries = $4, retry_delay_secs = $5,
             proxy_password_encrypted = $6, modified_at = NOW()
-        WHERE name = $7 AND user_id = $8
+        WHERE id = $7
         RETURNING *
       `,
         [
@@ -268,8 +286,7 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
           maxRetries ?? existing.rows[0].max_retries,
           retryDelaySecs ?? existing.rows[0].retry_delay_secs,
           proxyParam === undefined ? existing.rows[0].proxy_password_encrypted : proxyParam,
-          name,
-          request.user!.id,
+          existing.rows[0].id,
         ]
       );
 
@@ -283,12 +300,12 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
       return { data: formatActor(result.rows[0]!) };
     }
 
-    // Create new actor with user ownership
+    // Create new actor with workspace ownership
     const id = nanoid();
     const result = await query<ActorRow>(
       `
-      INSERT INTO actors (id, name, user_id, title, description, default_run_options, max_retries, retry_delay_secs, proxy_password_encrypted)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      INSERT INTO actors (id, name, user_id, title, description, default_run_options, max_retries, retry_delay_secs, proxy_password_encrypted, org_id)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
       RETURNING *
     `,
       [
@@ -301,6 +318,7 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
         maxRetries ?? 0,
         retryDelaySecs ?? 60,
         encryptIfSet(proxyPassword) ?? null,
+        ws.orgId || null,
       ]
     );
 
@@ -310,15 +328,18 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   /**
-   * GET /v2/acts/:actorId - Get actor (user-scoped)
+   * GET /v2/acts/:actorId - Get actor (user or team scoped)
    */
   fastify.get<{ Params: { actorId: string } }>('/acts/:actorId', async (request, reply) => {
     const { actorId } = request.params;
+    const isAdmin = request.user?.role === 'admin';
+    const params: unknown[] = [actorId];
+    const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, params);
 
-    // Get actor by ID or name, scoped to user
+    // Get actor by ID or name, scoped to user/team access
     const result = await query<ActorRow>(
-      `SELECT * FROM actors WHERE (id = $1 OR name = $1) AND user_id = $2`,
-      [actorId, request.user!.id]
+      `SELECT * FROM actors WHERE (id = $1 OR name = $1) AND ${accessWhere}`,
+      params
     );
 
     if (!result.rows[0]) {
@@ -330,7 +351,7 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   /**
-   * PUT /v2/acts/:actorId - Update actor
+   * PUT /v2/acts/:actorId - Update actor (user or team scoped)
    */
   fastify.put<{
     Params: { actorId: string };
@@ -342,10 +363,12 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
       maxRetries?: number;
       retryDelaySecs?: number;
       proxyPassword?: string | null;
+      version?: string;
     };
   }>('/acts/:actorId', async (request, reply) => {
     const { actorId } = request.params;
     const updates = UpdateActorSchema.parse(request.body);
+    const isAdmin = request.user?.role === 'admin';
 
     const setClauses: string[] = ['modified_at = NOW()'];
     const values: unknown[] = [];
@@ -383,14 +406,13 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     values.push(actorId);
-    const actorIdParam = paramIndex++;
-    values.push(request.user!.id);
-    const userIdParam = paramIndex++;
+    const targetIdParam = paramIndex++;
+    const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, values);
 
     const result = await query<ActorRow>(
       `
       UPDATE actors SET ${setClauses.join(', ')}
-      WHERE (id = $${actorIdParam} OR name = $${actorIdParam}) AND user_id = $${userIdParam}
+      WHERE (id = $${targetIdParam} OR name = $${targetIdParam}) AND ${accessWhere}
       RETURNING *
     `,
       values
@@ -414,115 +436,104 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   /**
-   * DELETE /v2/acts/:actorId - Delete actor (user-scoped)
+   * DELETE /v2/acts/:actorId - Delete actor (user or team scoped)
    */
   fastify.delete<{
     Params: { actorId: string };
+    Querystring: { force?: string };
   }>('/acts/:actorId', async (request, reply) => {
     const { actorId } = request.params;
     const { force } = DeleteActorQuerySchema.parse(request.query);
+    const isAdmin = request.user?.role === 'admin';
 
-    const client = await getClient();
-    try {
-      await client.query('BEGIN');
+    // 1. Get actor
+    const actorParams: unknown[] = [actorId];
+    const actorAccess = buildResourceAccessWhere(request.user!.id, isAdmin, actorParams);
+    const actorRes = await query<{ id: string }>(
+      `SELECT id FROM actors WHERE (id = $1 OR name = $1) AND ${actorAccess}`,
+      actorParams
+    );
+    if (actorRes.rows.length === 0) {
+      reply.status(404);
+      return { error: { type: 'record-not-found', message: 'Actor not found' } };
+    }
+    const targetActorId = actorRes.rows[0]!.id;
 
-      // Resolve actor to concrete ID once at the top so sub-queries stay clean,
-      // unknown actors 404 early, and operations have a stable key.
-      const actorRes = await client.query<{ id: string }>(
-        `SELECT id FROM actors WHERE (id = $1 OR name = $1) AND user_id = $2`,
-        [actorId, request.user!.id]
+    if (!force) {
+      // Check for any existing runs
+      const runParams: unknown[] = [targetActorId];
+      const runAccess = buildResourceAccessWhere(request.user!.id, isAdmin, runParams);
+      const runs = await query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM runs WHERE actor_id = $1 AND ${runAccess}`,
+        runParams
       );
-      if (actorRes.rows.length === 0) {
-        await client.query('ROLLBACK');
-        reply.status(404);
-        return { error: { type: 'record-not-found', message: 'Actor not found' } };
+      if (Number(runs.rows[0]?.count ?? 0) > 0) {
+        reply.status(409);
+        return {
+          error: {
+            type: 'actor-has-runs',
+            message: 'Actor has runs. Set force=true to delete the actor and its runs.',
+          },
+        };
       }
-      const targetActorId = actorRes.rows[0]!.id;
-
-      // Keep the default delete safe: callers must explicitly opt in before
-      // removing the actor's execution history. The count is scoped by user so
-      // a guessed actor id/name cannot reveal another tenant's runs.
-      if (!force) {
-        const runs = await client.query<{ count: string }>(
-          `SELECT COUNT(*)::text AS count FROM runs WHERE user_id = $2 AND actor_id = $1`,
-          [targetActorId, request.user!.id]
-        );
-        if (Number(runs.rows[0]?.count ?? 0) > 0) {
-          await client.query('ROLLBACK');
-          reply.status(409);
-          return {
-            error: {
-              type: 'actor-has-runs',
-              message: 'Actor has runs. Set force=true to delete the actor and its runs.',
-            },
-          };
-        }
-      } else {
-        // The schema deliberately keeps the default FK behaviour. Force delete
-        // performs the cascade explicitly in the route, scoped to the actor and
-        // tenant, so existing installations do not need a destructive migration.
-        const activeRuns = await client.query<{ count: string }>(
-          `SELECT COUNT(*)::text AS count FROM runs
-           WHERE user_id = $2 AND actor_id = $1 AND status IN ('READY', 'RUNNING', 'ABORTING')`,
-          [targetActorId, request.user!.id]
-        );
-        if (Number(activeRuns.rows[0]?.count ?? 0) > 0) {
-          await client.query('ROLLBACK');
-          reply.status(409);
-          return {
-            error: {
-              type: 'actor-has-active-runs',
-              message:
-                'Actor has active runs. Abort them and wait for termination before force deleting.',
-            },
-          };
-        }
-        // Delete runs and their deliveries in one statement so the cleanup
-        // targets exactly the deleted rows — a subquery evaluated in a
-        // separate statement could miss runs that turn terminal in between,
-        // orphaning their deliveries (webhook_deliveries.run_id has no FK to
-        // runs). The CTE keeps the id set server-side regardless of how large
-        // the run history is.
-        await client.query(
-          `WITH deleted_runs AS (
-             DELETE FROM runs
-             WHERE user_id = $2 AND actor_id = $1 AND status NOT IN ('READY', 'RUNNING', 'ABORTING')
-             RETURNING id
-           )
-           DELETE FROM webhook_deliveries wd
-           USING deleted_runs d
-           WHERE wd.run_id = d.id`,
-          [targetActorId, request.user!.id]
-        );
-        const remainingRuns = await client.query<{ count: string }>(
-          `SELECT COUNT(*)::text AS count FROM runs WHERE user_id = $2 AND actor_id = $1`,
-          [targetActorId, request.user!.id]
-        );
-        if (Number(remainingRuns.rows[0]?.count ?? 0) > 0) {
-          await client.query('ROLLBACK');
-          reply.status(409);
-          return {
-            error: {
-              type: 'actor-has-active-runs',
-              message:
-                'Actor has active runs. Abort them and wait for termination before force deleting.',
-            },
-          };
-        }
+    } else {
+      // Force delete: check for active runs first
+      const activeParams: unknown[] = [targetActorId];
+      const activeAccess = buildResourceAccessWhere(request.user!.id, isAdmin, activeParams);
+      const activeRuns = await query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM runs
+         WHERE actor_id = $1 AND ${activeAccess} AND status IN ('READY', 'RUNNING', 'ABORTING')`,
+        activeParams
+      );
+      if (Number(activeRuns.rows[0]?.count ?? 0) > 0) {
+        reply.status(409);
+        return {
+          error: {
+            type: 'actor-has-active-runs',
+            message:
+              'Actor has active runs. Abort them and wait for termination before force deleting.',
+          },
+        };
       }
 
-      await client.query(`DELETE FROM actors WHERE id = $1 AND user_id = $2`, [
-        targetActorId,
-        request.user!.id,
-      ]);
-      await client.query('COMMIT');
+      const delParams: unknown[] = [targetActorId];
+      const delAccess = buildResourceAccessWhere(request.user!.id, isAdmin, delParams);
+      await query(
+        `WITH deleted_runs AS (
+           DELETE FROM runs
+           WHERE actor_id = $1 AND ${delAccess} AND status NOT IN ('READY', 'RUNNING', 'ABORTING')
+           RETURNING id
+         )
+         DELETE FROM webhook_deliveries wd
+         USING deleted_runs d
+         WHERE wd.run_id = d.id`,
+        delParams
+      );
+
+      const postParams: unknown[] = [targetActorId];
+      const postAccess = buildResourceAccessWhere(request.user!.id, isAdmin, postParams);
+      const remainingRuns = await query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM runs WHERE actor_id = $1 AND ${postAccess}`,
+        postParams
+      );
+      if (Number(remainingRuns.rows[0]?.count ?? 0) > 0) {
+        reply.status(409);
+        return {
+          error: {
+            type: 'actor-has-runs',
+            message:
+              'A run was created while the actor was being deleted. Retry the force deletion.',
+          },
+        };
+      }
+    }
+
+    try {
+      const delActorParams: unknown[] = [targetActorId];
+      const delActorAccess = buildResourceAccessWhere(request.user!.id, isAdmin, delActorParams);
+      await query(`DELETE FROM actors WHERE id = $1 AND ${delActorAccess}`, delActorParams);
       reply.status(204);
     } catch (err) {
-      try {
-        await client.query('ROLLBACK');
-      } catch {
-        // Ignore rollback errors if transaction was already aborted or connection closed
-      }
       if ((err as { code?: string }).code === '23503') {
         reply.status(409);
         return {
@@ -535,8 +546,6 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
         };
       }
       throw err;
-    } finally {
-      client.release();
     }
   });
 
@@ -562,11 +571,14 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
     const parsed = ActorRunSchema.parse(request.body || {});
     const { input, envVars, webhooks } = parsed;
 
-    // Get actor by ID or name, scoped to user. We need the actor's
-    // default_run_options before we can resolve the run's timeout/memory.
+    const isAdmin = request.user?.role === 'admin';
+    const checkParams: unknown[] = [actorId];
+    const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, checkParams);
+
+    // Get actor by ID or name, scoped to user / team
     const actor = await query<ActorRow>(
-      `SELECT * FROM actors WHERE (id = $1 OR name = $1) AND user_id = $2`,
-      [actorId, request.user!.id]
+      `SELECT * FROM actors WHERE (id = $1 OR name = $1) AND ${accessWhere}`,
+      checkParams
     );
 
     if (!actor.rows[0]) {
@@ -574,12 +586,8 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
       return { error: { type: 'record-not-found', message: 'Actor not found' } };
     }
 
-    // Resolution order for timeout/memory: request body override → actor's
-    // default_run_options (set via `crc push` or PUT /v2/acts/:id) → the
-    // platform fallback (3600s / 1024 MB). Previously the handler ignored
-    // the actor's defaults and always fell back to 3600/1024 when the
-    // request body omitted them, so actors configured with e.g.
-    // timeoutSecs=7200 were silently killed at 3600s.
+    const actorOrgId = actor.rows[0].org_id || null;
+
     const actorDefaults = (actor.rows[0].default_run_options ?? null) as {
       timeoutSecs?: number;
       memoryMbytes?: number;
@@ -593,21 +601,21 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
     const requestQueueId = nanoid();
     const runId = nanoid();
 
-    // Create storages with user ownership.
-    // KEEP-IN-SYNC: the rerun endpoint (routes/runs.ts POST
-    // /actor-runs/:runId/rerun) clones this creation flow — storage trio,
-    // INPUT write, build stamp. Update both together.
-    await query('INSERT INTO datasets (id, user_id) VALUES ($1, $2)', [
+    // Create storages with workspace/user ownership.
+    await query('INSERT INTO datasets (id, user_id, org_id) VALUES ($1, $2, $3)', [
       datasetId,
       request.user!.id,
+      actorOrgId,
     ]);
-    await query('INSERT INTO key_value_stores (id, user_id) VALUES ($1, $2)', [
+    await query('INSERT INTO key_value_stores (id, user_id, org_id) VALUES ($1, $2, $3)', [
       kvStoreId,
       request.user!.id,
+      actorOrgId,
     ]);
-    await query('INSERT INTO request_queues (id, user_id) VALUES ($1, $2)', [
+    await query('INSERT INTO request_queues (id, user_id, org_id) VALUES ($1, $2, $3)', [
       requestQueueId,
       request.user!.id,
+      actorOrgId,
     ]);
 
     // Always store input in the KV store (empty object if not provided)
@@ -631,7 +639,7 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
     const buildId = buildLookup.rows[0]?.build_id ?? null;
     const buildNumber = buildLookup.rows[0]?.version_number ?? null;
 
-    // Create run record with READY status so Runner picks it up (with user ownership)
+    // Create run record with READY status so Runner picks it up (with user & org ownership)
     const result = await query<{
       id: string;
       actor_id: string;
@@ -645,14 +653,15 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
       created_at: Date;
     }>(
       `
-      INSERT INTO runs (id, actor_id, user_id, status, default_dataset_id, default_key_value_store_id, default_request_queue_id, timeout_secs, memory_mbytes, build_id, build_number)
-      VALUES ($1, $2, $3, 'READY', $4, $5, $6, $7, $8, $9, $10)
+      INSERT INTO runs (id, actor_id, user_id, org_id, status, default_dataset_id, default_key_value_store_id, default_request_queue_id, timeout_secs, memory_mbytes, build_id, build_number)
+      VALUES ($1, $2, $3, $4, 'READY', $5, $6, $7, $8, $9, $10, $11)
       RETURNING *
     `,
       [
         runId,
         actor.rows[0].id,
         request.user!.id,
+        actorOrgId,
         datasetId,
         kvStoreId,
         requestQueueId,

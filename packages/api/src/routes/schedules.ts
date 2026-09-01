@@ -9,10 +9,17 @@ import { query } from '../db/index.js';
 import { appendSearchCondition } from '../db/search.js';
 import { authenticate } from '../auth/middleware.js';
 import { computeNextRun } from '../scheduler.js';
+import {
+  getRequestWorkspace,
+  requireWorkspaceRole,
+  buildWorkspaceWhere,
+  buildResourceAccessWhere,
+} from '../auth/workspace.js';
 
 interface ScheduleRow {
   id: string;
   user_id: string | null;
+  org_id: string | null;
   actor_id: string;
   name: string;
   cron_expression: string;
@@ -42,11 +49,17 @@ export const schedulesRoutes: FastifyPluginAsync = async (fastify) => {
     };
   }>('/schedules', async (request, reply) => {
     const data = CreateScheduleSchema.parse(request.body);
+    const ws = await getRequestWorkspace(request);
+    await requireWorkspaceRole(request, ws.orgId, 'member');
 
-    // Verify actor exists and belongs to user
-    const actor = await query(
-      'SELECT id FROM actors WHERE (id = $1 OR name = $1) AND user_id = $2',
-      [data.actorId, request.user!.id]
+    const isAdmin = request.user?.role === 'admin';
+    const checkParams: unknown[] = [data.actorId];
+    const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, checkParams);
+
+    // Verify actor exists and is accessible
+    const actor = await query<{ id: string; org_id: string | null }>(
+      `SELECT id, org_id FROM actors WHERE (id = $1 OR name = $1) AND ${accessWhere}`,
+      checkParams
     );
 
     if (!actor.rows[0]) {
@@ -54,11 +67,9 @@ export const schedulesRoutes: FastifyPluginAsync = async (fastify) => {
       return { error: { type: 'record-not-found', message: 'Actor not found' } };
     }
 
-    const actorId = (actor.rows[0] as { id: string }).id;
+    const actorId = actor.rows[0].id;
+    const targetOrgId = ws.orgId || actor.rows[0].org_id || null;
 
-    // Compute next_run_at so the next scheduler tick can pick it up without
-    // a warm-up cycle. Invalid cron expressions are rejected at the route
-    // boundary rather than silently delaying the first fire.
     let nextRunAt: Date;
     try {
       nextRunAt = computeNextRun(data.cronExpression, data.timezone ?? 'UTC');
@@ -69,12 +80,13 @@ export const schedulesRoutes: FastifyPluginAsync = async (fastify) => {
 
     const id = nanoid();
     const result = await query<ScheduleRow>(
-      `INSERT INTO schedules (id, user_id, actor_id, name, cron_expression, timezone, is_enabled, input, next_run_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `INSERT INTO schedules (id, user_id, org_id, actor_id, name, cron_expression, timezone, is_enabled, input, next_run_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        RETURNING *`,
       [
         id,
         request.user!.id,
+        targetOrgId,
         actorId,
         data.name,
         data.cronExpression,
@@ -90,7 +102,7 @@ export const schedulesRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   /**
-   * GET /v2/schedules - List user's schedules
+   * GET /v2/schedules - List workspace schedules
    */
   fastify.get<{
     Querystring: { offset?: string; limit?: string; q?: string };
@@ -98,11 +110,10 @@ export const schedulesRoutes: FastifyPluginAsync = async (fastify) => {
     const offset = Math.max(0, parseInt(request.query.offset || '0', 10) || 0);
     const limit = Math.min(1000, Math.max(1, parseInt(request.query.limit || '100', 10) || 100));
 
-    const params: unknown[] = [request.user!.id];
-    const where = appendSearchCondition('user_id = $1', params, request.query.q || '', [
-      'id',
-      'name',
-    ]);
+    const ws = await getRequestWorkspace(request);
+    const params: unknown[] = [];
+    const wsWhere = buildWorkspaceWhere(ws, request.user!.id, params);
+    const where = appendSearchCondition(wsWhere, params, request.query.q || '', ['id', 'name']);
 
     const [countResult, pageResult] = await Promise.all([
       query<{ total: string }>(
@@ -131,16 +142,19 @@ export const schedulesRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   /**
-   * GET /v2/schedules/:scheduleId - Get single schedule (user-scoped)
+   * GET /v2/schedules/:scheduleId - Get single schedule (user or team scoped)
    */
   fastify.get<{ Params: { scheduleId: string } }>(
     '/schedules/:scheduleId',
     async (request, reply) => {
       const { scheduleId } = request.params;
+      const isAdmin = request.user?.role === 'admin';
+      const params: unknown[] = [scheduleId];
+      const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, params);
 
       const result = await query<ScheduleRow>(
-        'SELECT * FROM schedules WHERE id = $1 AND user_id = $2',
-        [scheduleId, request.user!.id]
+        `SELECT * FROM schedules WHERE id = $1 AND ${accessWhere}`,
+        params
       );
 
       if (!result.rows[0]) {
@@ -153,7 +167,7 @@ export const schedulesRoutes: FastifyPluginAsync = async (fastify) => {
   );
 
   /**
-   * PUT /v2/schedules/:scheduleId - Update schedule (user-scoped)
+   * PUT /v2/schedules/:scheduleId - Update schedule (user or team scoped)
    */
   fastify.put<{
     Params: { scheduleId: string };
@@ -169,11 +183,19 @@ export const schedulesRoutes: FastifyPluginAsync = async (fastify) => {
     const { scheduleId } = request.params;
     const updates = UpdateScheduleSchema.parse(request.body);
 
-    // If actorId is being changed, verify new actor belongs to user
+    const isAdmin = request.user?.role === 'admin';
+
+    // If actorId is being changed, verify new actor belongs to workspace
     if (updates.actorId !== undefined) {
-      const actor = await query(
-        'SELECT id FROM actors WHERE (id = $1 OR name = $1) AND user_id = $2',
-        [updates.actorId, request.user!.id]
+      const actorCheckParams: unknown[] = [updates.actorId];
+      const actorAccessWhere = buildResourceAccessWhere(
+        request.user!.id,
+        isAdmin,
+        actorCheckParams
+      );
+      const actor = await query<{ id: string }>(
+        `SELECT id FROM actors WHERE (id = $1 OR name = $1) AND ${actorAccessWhere}`,
+        actorCheckParams
       );
 
       if (!actor.rows[0]) {
@@ -181,18 +203,9 @@ export const schedulesRoutes: FastifyPluginAsync = async (fastify) => {
         return { error: { type: 'record-not-found', message: 'Actor not found' } };
       }
 
-      updates.actorId = (actor.rows[0] as { id: string }).id;
+      updates.actorId = actor.rows[0].id;
     }
 
-    // Pre-validation: when cron_expression or timezone is changing, OR
-    // when isEnabled is being flipped to true, we need a freshly-computed
-    // next_run_at folded into the SAME UPDATE — so a bad cron value never
-    // persists to the DB, and a re-enabled schedule doesn't inherit a
-    // stale (past) next_run_at that would cause it to fire immediately.
-    //
-    // Gemini bot review on PR #47:
-    //   - Critical: validate cron BEFORE the UPDATE, not after.
-    //   - High: recompute next_run_at when isEnabled flips false → true.
     const needsRecompute =
       updates.cronExpression !== undefined ||
       updates.timezone !== undefined ||
@@ -200,9 +213,11 @@ export const schedulesRoutes: FastifyPluginAsync = async (fastify) => {
 
     let recomputedNextRunAt: Date | null = null;
     if (needsRecompute) {
+      const checkParams: unknown[] = [scheduleId];
+      const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, checkParams);
       const existing = await query<{ cron_expression: string; timezone: string }>(
-        'SELECT cron_expression, timezone FROM schedules WHERE id = $1 AND user_id = $2',
-        [scheduleId, request.user!.id]
+        `SELECT cron_expression, timezone FROM schedules WHERE id = $1 AND ${accessWhere}`,
+        checkParams
       );
       if (!existing.rows[0]) {
         reply.status(404);
@@ -252,12 +267,12 @@ export const schedulesRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     values.push(scheduleId);
+    const scheduleIdParam = paramIndex++;
+    const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, values);
 
-    // Add user_id filter for authorization
-    values.push(request.user!.id);
     const result = await query<ScheduleRow>(
       `UPDATE schedules SET ${setClauses.join(', ')}
-       WHERE id = $${paramIndex} AND user_id = $${paramIndex + 1}
+       WHERE id = $${scheduleIdParam} AND ${accessWhere}
        RETURNING *`,
       values
     );
@@ -271,25 +286,25 @@ export const schedulesRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   /**
-   * DELETE /v2/schedules/:scheduleId - Delete schedule (user-scoped)
+   * DELETE /v2/schedules/:scheduleId - Delete schedule (user or team scoped)
    */
   fastify.delete<{ Params: { scheduleId: string } }>(
     '/schedules/:scheduleId',
     async (request, reply) => {
       const { scheduleId } = request.params;
+      const isAdmin = request.user?.role === 'admin';
+      const params: unknown[] = [scheduleId];
+      const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, params);
+
       const result = await query(
-        'DELETE FROM schedules WHERE id = $1 AND user_id = $2 RETURNING id',
-        [scheduleId, request.user!.id]
+        `DELETE FROM schedules WHERE id = $1 AND ${accessWhere} RETURNING id`,
+        params
       );
 
       if (result.rowCount === 0) {
         reply.status(404);
         return { error: { type: 'record-not-found', message: 'Schedule not found' } };
       }
-
-      // No need to unregister an in-process cron job — the next scheduler
-      // tick reads `is_enabled = true` from the DB and naturally ignores
-      // deleted rows.
 
       reply.status(204);
     }

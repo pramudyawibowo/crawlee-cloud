@@ -16,11 +16,18 @@ import {
 } from '../storage/s3.js';
 import { authenticate } from '../auth/middleware.js';
 import { CreateKeyValueStoreSchema } from '../schemas/key-value-stores.js';
+import {
+  getRequestWorkspace,
+  requireWorkspaceRole,
+  buildWorkspaceWhere,
+  buildResourceAccessWhere,
+} from '../auth/workspace.js';
 
 interface KVStoreRow {
   id: string;
   name: string | null;
   user_id: string | null;
+  org_id: string | null;
   created_at: Date;
   modified_at: Date;
   accessed_at: Date;
@@ -30,7 +37,7 @@ export const keyValueStoresRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.addHook('preHandler', authenticate);
 
   /**
-   * GET /v2/key-value-stores - List stores (user-scoped)
+   * GET /v2/key-value-stores - List stores (workspace-scoped)
    */
   fastify.get<{
     Querystring: { offset?: string; limit?: string; q?: string };
@@ -38,11 +45,10 @@ export const keyValueStoresRoutes: FastifyPluginAsync = async (fastify) => {
     const offset = Math.max(0, parseInt(request.query.offset || '0', 10) || 0);
     const limit = Math.min(1000, Math.max(1, parseInt(request.query.limit || '100', 10) || 100));
 
-    const params: unknown[] = [request.user!.id];
-    const where = appendSearchCondition('user_id = $1', params, request.query.q || '', [
-      'id',
-      'name',
-    ]);
+    const ws = await getRequestWorkspace(request);
+    const params: unknown[] = [];
+    const wsWhere = buildWorkspaceWhere(ws, request.user!.id, params);
+    const where = appendSearchCondition(wsWhere, params, request.query.q || '', ['id', 'name']);
 
     const [countResult, pageResult] = await Promise.all([
       query<{ total: string }>(
@@ -79,11 +85,21 @@ export const keyValueStoresRoutes: FastifyPluginAsync = async (fastify) => {
       const body = CreateKeyValueStoreSchema.parse(request.body || {});
       const name = request.query.name || body.name;
 
+      const ws = await getRequestWorkspace(request);
+      await requireWorkspaceRole(request, ws.orgId, 'member');
+
       if (name) {
-        const existing = await query<KVStoreRow>(
-          'SELECT * FROM key_value_stores WHERE name = $1 AND user_id = $2',
-          [name, request.user!.id]
-        );
+        let existingQuery = '';
+        let existingParams: unknown[] = [];
+        if (ws.orgId) {
+          existingQuery = 'SELECT * FROM key_value_stores WHERE name = $1 AND org_id = $2';
+          existingParams = [name, ws.orgId];
+        } else {
+          existingQuery =
+            'SELECT * FROM key_value_stores WHERE name = $1 AND org_id IS NULL AND user_id = $2';
+          existingParams = [name, request.user!.id];
+        }
+        const existing = await query<KVStoreRow>(existingQuery, existingParams);
         if (existing.rows[0]) {
           return { data: formatStore(existing.rows[0]) };
         }
@@ -91,8 +107,8 @@ export const keyValueStoresRoutes: FastifyPluginAsync = async (fastify) => {
 
       const id = nanoid();
       const result = await query<KVStoreRow>(
-        `INSERT INTO key_value_stores (id, name, user_id) VALUES ($1, $2, $3) RETURNING *`,
-        [id, name || null, request.user!.id]
+        `INSERT INTO key_value_stores (id, name, user_id, org_id) VALUES ($1, $2, $3, $4) RETURNING *`,
+        [id, name || null, request.user!.id, ws.orgId || null]
       );
 
       reply.status(201);
@@ -101,16 +117,19 @@ export const keyValueStoresRoutes: FastifyPluginAsync = async (fastify) => {
   );
 
   /**
-   * GET /v2/key-value-stores/:storeId - Get store info (user-scoped)
+   * GET /v2/key-value-stores/:storeId - Get store info (user or team scoped)
    */
   fastify.get<{ Params: { storeId: string } }>(
     '/key-value-stores/:storeId',
     async (request, reply) => {
       const { storeId } = request.params;
+      const isAdmin = request.user?.role === 'admin';
+      const params: unknown[] = [storeId, storeId];
+      const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, params);
 
       const result = await query<KVStoreRow>(
-        'SELECT * FROM key_value_stores WHERE (id = $1 OR name = $2) AND user_id = $3',
-        [storeId, storeId, request.user!.id]
+        `SELECT * FROM key_value_stores WHERE (id = $1 OR name = $2) AND ${accessWhere}`,
+        params
       );
 
       if (!result.rows[0]) {
@@ -127,18 +146,19 @@ export const keyValueStoresRoutes: FastifyPluginAsync = async (fastify) => {
   );
 
   /**
-   * DELETE /v2/key-value-stores/:storeId - Delete store (user-scoped)
+   * DELETE /v2/key-value-stores/:storeId - Delete store (user or team scoped)
    */
   fastify.delete<{ Params: { storeId: string } }>(
     '/key-value-stores/:storeId',
     async (request, reply) => {
       const { storeId } = request.params;
-      // RETURNING id so the S3 cleanup uses the canonical id even when
-      // the lookup happened by name. See the parallel comment on
-      // routes/datasets.ts for the leak-fix rationale.
+      const isAdmin = request.user?.role === 'admin';
+      const params: unknown[] = [storeId, storeId];
+      const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, params);
+
       const result = await query<{ id: string }>(
-        'DELETE FROM key_value_stores WHERE (id = $1 OR name = $2) AND user_id = $3 RETURNING id',
-        [storeId, storeId, request.user!.id]
+        `DELETE FROM key_value_stores WHERE (id = $1 OR name = $2) AND ${accessWhere} RETURNING id`,
+        params
       );
       if (result.rowCount === 0) {
         reply.status(404);
@@ -146,12 +166,6 @@ export const keyValueStoresRoutes: FastifyPluginAsync = async (fastify) => {
       }
       const deletedId = result.rows[0]!.id;
 
-      // Fire-and-forget S3 prefix cleanup. PG row is already gone; an S3
-      // failure means orphaned bytes, not a half-deleted store. We still
-      // return 204 because the dataset/KV store IS gone from the user's
-      // view — the failure mode is "you pay for some leftover storage
-      // bytes" which is the same as if a network blip dropped the S3
-      // call. See routes/datasets.ts DELETE handler for full reasoning.
       try {
         await deleteKVStoreS3Prefix(deletedId);
       } catch (err) {
@@ -176,9 +190,13 @@ export const keyValueStoresRoutes: FastifyPluginAsync = async (fastify) => {
     const limit = parseInt(request.query.limit || '100', 10);
     const { exclusiveStartKey } = request.query;
 
+    const isAdmin = request.user?.role === 'admin';
+    const params: unknown[] = [storeId, storeId];
+    const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, params);
+
     const store = await query<KVStoreRow>(
-      'SELECT * FROM key_value_stores WHERE (id = $1 OR name = $2) AND user_id = $3',
-      [storeId, storeId, request.user!.id]
+      `SELECT * FROM key_value_stores WHERE (id = $1 OR name = $2) AND ${accessWhere}`,
+      params
     );
 
     if (!store.rows[0]) {
@@ -209,11 +227,14 @@ export const keyValueStoresRoutes: FastifyPluginAsync = async (fastify) => {
     Querystring: { presigned?: string };
   }>('/key-value-stores/:storeId/records/:key', async (request, reply) => {
     const { storeId, key } = request.params;
+    const isAdmin = request.user?.role === 'admin';
+    const params: unknown[] = [storeId, storeId];
+    const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, params);
 
-    // Get store (user-scoped)
+    // Get store (user or team scoped)
     const store = await query<KVStoreRow>(
-      'SELECT * FROM key_value_stores WHERE (id = $1 OR name = $2) AND user_id = $3',
-      [storeId, storeId, request.user!.id]
+      `SELECT * FROM key_value_stores WHERE (id = $1 OR name = $2) AND ${accessWhere}`,
+      params
     );
 
     if (!store.rows[0]) {
@@ -221,10 +242,6 @@ export const keyValueStoresRoutes: FastifyPluginAsync = async (fastify) => {
       return { error: { type: 'record-not-found', message: 'Key-value store not found' } };
     }
 
-    // ?presigned=1 — return a 1-hour S3 URL the browser can open directly.
-    // Sidesteps the API server entirely for large payloads (binary
-    // screenshots, megabyte-sized JSON, etc.) and matches Apify's UX:
-    // dashboard renders nothing huge, "View raw" opens a static file.
     if (request.query.presigned === '1' || request.query.presigned === 'true') {
       const presigned = await presignKVRecord(store.rows[0].id, key);
       if (!presigned) {
@@ -237,12 +254,6 @@ export const keyValueStoresRoutes: FastifyPluginAsync = async (fastify) => {
     const record = await getKVRecord(store.rows[0].id, key);
 
     if (!record) {
-      // Apify SDK contract: a missing record must be 404 with
-      // error.type='record-not-found'. apify-client's catchNotFoundOrThrow
-      // is what turns this into `undefined` for the caller (Crawlee's
-      // KeyValueStore.getValue, Actor.getInput, etc.). 204 was the wrong
-      // status — the SDK treats it as a successful empty response and
-      // returns a truthy stub instead of falling through.
       reply.status(404);
       return { error: { type: 'record-not-found', message: 'Record not found' } };
     }
@@ -262,10 +273,14 @@ export const keyValueStoresRoutes: FastifyPluginAsync = async (fastify) => {
       const { storeId, key } = request.params;
       const contentType = request.headers['content-type'] ?? 'application/json';
 
-      // Get or auto-create store (user-scoped)
+      const isAdmin = request.user?.role === 'admin';
+      const params: unknown[] = [storeId, storeId];
+      const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, params);
+
+      // Get or auto-create store
       let store = await query<KVStoreRow>(
-        'SELECT * FROM key_value_stores WHERE (id = $1 OR name = $2) AND user_id = $3',
-        [storeId, storeId, request.user!.id]
+        `SELECT * FROM key_value_stores WHERE (id = $1 OR name = $2) AND ${accessWhere}`,
+        params
       );
 
       if (!store.rows[0]) {
@@ -275,28 +290,20 @@ export const keyValueStoresRoutes: FastifyPluginAsync = async (fastify) => {
           `INSERT INTO key_value_stores (id, name, user_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
           [id, storeId === 'default' ? null : storeId, request.user!.id]
         );
+        const recheckParams: unknown[] = [id, id];
+        const recheckAccess = buildResourceAccessWhere(request.user!.id, isAdmin, recheckParams);
         store = await query<KVStoreRow>(
-          'SELECT * FROM key_value_stores WHERE id = $1 AND user_id = $2',
-          [id, request.user!.id]
+          `SELECT * FROM key_value_stores WHERE (id = $1 OR name = $2) AND ${recheckAccess}`,
+          recheckParams
         );
       }
 
       if (!store.rows[0]) {
-        // The id exists globally but under another user: the INSERT
-        // no-ops on conflict and the user-scoped re-SELECT comes back
-        // empty. Pre-fix, the non-null assertion below turned this into
-        // an unhandled TypeError (HTTP 500). A clean 404 matches the GET
-        // route's posture and lets callers (e.g. the runner's failed-run
-        // log archiver) treat it as a quiet skip.
         reply.status(404);
         return { error: { type: 'record-not-found', message: 'Store not found' } };
       }
 
       const body = request.body;
-      // Pass Buffer bodies through unchanged. toString('utf-8') would corrupt
-      // any non-UTF-8 bytes into U+FFFD replacement chars — fatal for binary
-      // payloads (PNG screenshots, gzipped artifacts, etc.) that the Apify
-      // SDK uploads via Actor.setValue(key, buffer, { contentType }).
       let data: Buffer | string;
       if (Buffer.isBuffer(body)) {
         data = body;
@@ -324,10 +331,13 @@ export const keyValueStoresRoutes: FastifyPluginAsync = async (fastify) => {
     '/key-value-stores/:storeId/records/:key',
     async (request, reply) => {
       const { storeId, key } = request.params;
+      const isAdmin = request.user?.role === 'admin';
+      const params: unknown[] = [storeId, storeId];
+      const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, params);
 
       const store = await query<KVStoreRow>(
-        'SELECT * FROM key_value_stores WHERE (id = $1 OR name = $2) AND user_id = $3',
-        [storeId, storeId, request.user!.id]
+        `SELECT * FROM key_value_stores WHERE (id = $1 OR name = $2) AND ${accessWhere}`,
+        params
       );
 
       if (!store.rows[0]) {
@@ -336,6 +346,7 @@ export const keyValueStoresRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       await deleteKVRecord(store.rows[0].id, key);
+
       reply.status(204);
     }
   );

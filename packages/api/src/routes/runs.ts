@@ -10,6 +10,11 @@ import { authenticate } from '../auth/middleware.js';
 import { UpdateRunSchema, ListRunsQuerySchema, RunsHistogramQuerySchema } from '../schemas/runs.js';
 import { config } from '../config.js';
 import { computeYourCostUsd, type CostWindow } from '../lib/run-cost.js';
+import {
+  getRequestWorkspace,
+  buildWorkspaceWhere,
+  buildResourceAccessWhere,
+} from '../auth/workspace.js';
 
 interface RunRow {
   id: string;
@@ -91,9 +96,11 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
     // ambiguous". The COUNT query doesn't join, but using `r.` there
     // too keeps the where-builder uniform (and harmless: bare-`runs`
     // can be aliased to `r` via the table-alias form below).
-    const where: string[] = ['r.user_id = $1'];
-    const params: unknown[] = [request.user!.id];
-    let p = 2;
+    const ws = await getRequestWorkspace(request);
+    const params: unknown[] = [];
+    const wsWhere = buildWorkspaceWhere(ws, request.user!.id, params, 'r');
+    const where: string[] = [wsWhere];
+    let p = params.length + 1;
     if (q.status !== undefined) {
       where.push(`r.status = $${p++}`);
       params.push(q.status);
@@ -167,6 +174,10 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
    * matches "stats" literally rather than as a runId.
    */
   fastify.get('/actor-runs/stats', async (request) => {
+    const ws = await getRequestWorkspace(request);
+    const params: unknown[] = [];
+    const wsWhere = buildWorkspaceWhere(ws, request.user!.id, params);
+
     // `failed` counts FAILED and TIMED-OUT together — TIMED-OUT is
     // operationally a failure (platform killed the run for missing its
     // deadline) and the dashboard's hourly histogram already groups them
@@ -179,12 +190,6 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
       failed: string;
       failed_last_24h: string;
     }>(
-      // `failed_last_24h` uses the same hour-aligned 24h window as
-      // /actor-runs/histogram (`date_trunc('hour', NOW()) - 23 hours`)
-      // so the "Failed · 24h" tile and the histogram's red caps cover
-      // the same span. A rolling `NOW() - 24 hours` window would drift
-      // up to 59 minutes from the histogram's hour-bucketed start at
-      // the top of each hour, making the two views silently disagree.
       `SELECT
          COUNT(*)::text AS total,
          COUNT(*) FILTER (WHERE status = 'RUNNING')::text AS running,
@@ -195,8 +200,8 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
              AND created_at >= date_trunc('hour', NOW()) - INTERVAL '23 hours'
          )::text AS failed_last_24h
        FROM runs
-       WHERE user_id = $1`,
-      [request.user!.id]
+       WHERE ${wsWhere}`,
+      params
     );
     const row = result.rows[0]!;
     return {
@@ -212,29 +217,23 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
 
   /**
    * GET /v2/actor-runs/histogram - Hourly run counts for the dashboard.
-   *
-   * Returns exactly `hours` rows, one per wall-clock hour ending at the current
-   * hour. Empty hours come back as zero-count buckets (via generate_series spine
-   * + LEFT JOIN), so the client can render a fixed-width chart without holes.
-   *
-   * Aggregation is server-side: we never ship row-level run data for this view,
-   * which keeps the payload bounded (≤168 rows) regardless of cluster volume.
-   *
-   * Static path is registered before `/actor-runs/:runId` so Fastify's trie
-   * matches "histogram" literally rather than as a runId.
-   *
-   * Failure semantics match the `/stats` endpoint: FAILED ∪ TIMED-OUT.
    */
   fastify.get('/actor-runs/histogram', async (request) => {
     const q = RunsHistogramQuerySchema.parse(request.query);
     const hours = q.hours ?? 24;
+
+    const ws = await getRequestWorkspace(request);
+    const params: unknown[] = [];
+    const wsWhere = buildWorkspaceWhere(ws, request.user!.id, params);
+    params.push(hours);
+    const hoursParam = `$${params.length}`;
 
     // make_interval keeps `hours` parameterised — no SQL string-building. The
     // spine is `hours` rows: [now-hour - (hours-1)h, ..., now-hour].
     const result = await query<{ bucket: Date; total: string; failed: string }>(
       `WITH spine AS (
          SELECT generate_series(
-           date_trunc('hour', NOW()) - make_interval(hours => $2 - 1),
+           date_trunc('hour', NOW()) - make_interval(hours => ${hoursParam} - 1),
            date_trunc('hour', NOW()),
            INTERVAL '1 hour'
          ) AS bucket
@@ -245,8 +244,8 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
            COUNT(*)::text AS total,
            COUNT(*) FILTER (WHERE status IN ('FAILED', 'TIMED-OUT'))::text AS failed
          FROM runs
-         WHERE user_id = $1
-           AND created_at >= date_trunc('hour', NOW()) - make_interval(hours => $2 - 1)
+         WHERE ${wsWhere}
+           AND created_at >= date_trunc('hour', NOW()) - make_interval(hours => ${hoursParam} - 1)
          GROUP BY bucket
        )
        SELECT
@@ -256,7 +255,7 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
        FROM spine
        LEFT JOIN agg USING (bucket)
        ORDER BY spine.bucket ASC`,
-      [request.user!.id, hours]
+      params
     );
 
     return {
@@ -272,14 +271,17 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   /**
-   * GET /v2/actor-runs/:runId - Get run (user-scoped)
+   * GET /v2/actor-runs/:runId - Get run (user or team scoped)
    */
   fastify.get<{ Params: { runId: string } }>('/actor-runs/:runId', async (request, reply) => {
     const { runId } = request.params;
+    const isAdmin = request.user?.role === 'admin';
+    const params: unknown[] = [runId];
+    const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, params, 'r');
 
     const result = await query<RunRow>(
-      `${RUN_SELECT_WITH_DATASET_COUNT} WHERE r.id = $1 AND r.user_id = $2`,
-      [runId, request.user!.id]
+      `${RUN_SELECT_WITH_DATASET_COUNT} WHERE r.id = $1 AND ${accessWhere}`,
+      params
     );
 
     if (!result.rows[0]) {

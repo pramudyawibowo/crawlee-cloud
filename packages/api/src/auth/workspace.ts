@@ -70,3 +70,43 @@ export async function requireWorkspaceRole(
     throw err;
   }
 }
+
+/**
+ * Helper to build the workspace-scoped WHERE clause for list endpoints.
+ *
+ * @param ws WorkspaceScope from getRequestWorkspace(request)
+ * @param userId User ID of current authenticated user
+ * @param params Array of SQL query params to push into
+ * @param tableAlias Optional table alias like 'r.' or 'r'
+ * @returns SQL WHERE condition fragment (e.g. "org_id = $1" or "(org_id IS NULL AND user_id = $1)")
+ */
+export function buildWorkspaceWhere(
+  ws: WorkspaceScope,
+  userId: string,
+  params: unknown[],
+  tableAlias = ''
+): string {
+  const prefix = tableAlias ? (tableAlias.endsWith('.') ? tableAlias : `${tableAlias}.`) : '';
+  if (ws.orgId) {
+    params.push(ws.orgId);
+    return `${prefix}org_id = $${params.length}`;
+  }
+  params.push(userId);
+  return `(${prefix}org_id IS NULL AND ${prefix}user_id = $${params.length})`;
+}
+
+/**
+ * Helper to check single resource read/access condition (by ownership, membership, or system admin).
+ */
+export function buildResourceAccessWhere(
+  userId: string,
+  isAdmin: boolean,
+  params: unknown[],
+  tableAlias = ''
+): string {
+  if (isAdmin) return '1=1';
+  const prefix = tableAlias ? (tableAlias.endsWith('.') ? tableAlias : `${tableAlias}.`) : '';
+  params.push(userId);
+  const p = `$${params.length}`;
+  return `(${prefix}user_id = ${p} OR (${prefix}org_id IS NOT NULL AND EXISTS (SELECT 1 FROM organization_members om WHERE om.org_id = ${prefix}org_id AND om.user_id = ${p})))`;
+}

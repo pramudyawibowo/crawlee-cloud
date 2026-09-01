@@ -17,11 +17,18 @@ import {
 import { authenticate } from '../auth/middleware.js';
 import { config } from '../config.js';
 import { CreateDatasetSchema } from '../schemas/datasets.js';
+import {
+  getRequestWorkspace,
+  requireWorkspaceRole,
+  buildWorkspaceWhere,
+  buildResourceAccessWhere,
+} from '../auth/workspace.js';
 
 interface DatasetRow {
   id: string;
   name: string | null;
   user_id: string | null;
+  org_id: string | null;
   created_at: Date;
   modified_at: Date;
   accessed_at: Date;
@@ -32,7 +39,7 @@ export const datasetsRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.addHook('preHandler', authenticate);
 
   /**
-   * GET /v2/datasets - List datasets (user-scoped)
+   * GET /v2/datasets - List datasets (workspace-scoped)
    */
   fastify.get<{
     Querystring: { offset?: string; limit?: string; q?: string };
@@ -40,11 +47,10 @@ export const datasetsRoutes: FastifyPluginAsync = async (fastify) => {
     const offset = Math.max(0, parseInt(request.query.offset || '0', 10) || 0);
     const limit = Math.min(1000, Math.max(1, parseInt(request.query.limit || '100', 10) || 100));
 
-    const params: unknown[] = [request.user!.id];
-    const where = appendSearchCondition('user_id = $1', params, request.query.q || '', [
-      'id',
-      'name',
-    ]);
+    const ws = await getRequestWorkspace(request);
+    const params: unknown[] = [];
+    const wsWhere = buildWorkspaceWhere(ws, request.user!.id, params);
+    const where = appendSearchCondition(wsWhere, params, request.query.q || '', ['id', 'name']);
 
     const [countResult, pageResult] = await Promise.all([
       query<{ total: string }>(
@@ -81,22 +87,31 @@ export const datasetsRoutes: FastifyPluginAsync = async (fastify) => {
       const body = CreateDatasetSchema.parse(request.body || {});
       const name = request.query.name || body.name;
 
+      const ws = await getRequestWorkspace(request);
+      await requireWorkspaceRole(request, ws.orgId, 'member');
+
       if (name) {
-        // Try to get existing for this user
-        const existing = await query<DatasetRow>(
-          'SELECT * FROM datasets WHERE name = $1 AND user_id = $2',
-          [name, request.user!.id]
-        );
+        let existingQuery = '';
+        let existingParams: unknown[] = [];
+        if (ws.orgId) {
+          existingQuery = 'SELECT * FROM datasets WHERE name = $1 AND org_id = $2';
+          existingParams = [name, ws.orgId];
+        } else {
+          existingQuery =
+            'SELECT * FROM datasets WHERE name = $1 AND org_id IS NULL AND user_id = $2';
+          existingParams = [name, request.user!.id];
+        }
+        const existing = await query<DatasetRow>(existingQuery, existingParams);
         if (existing.rows[0]) {
           return { data: formatDataset(existing.rows[0]) };
         }
       }
 
-      // Create new with user ownership
+      // Create new with workspace ownership
       const id = nanoid();
       const result = await query<DatasetRow>(
-        `INSERT INTO datasets (id, name, user_id) VALUES ($1, $2, $3) RETURNING *`,
-        [id, name || null, request.user!.id]
+        `INSERT INTO datasets (id, name, user_id, org_id) VALUES ($1, $2, $3, $4) RETURNING *`,
+        [id, name || null, request.user!.id, ws.orgId || null]
       );
 
       reply.status(201);
@@ -105,14 +120,17 @@ export const datasetsRoutes: FastifyPluginAsync = async (fastify) => {
   );
 
   /**
-   * GET /v2/datasets/:datasetId - Get dataset info (user-scoped)
+   * GET /v2/datasets/:datasetId - Get dataset info (user or team scoped)
    */
   fastify.get<{ Params: { datasetId: string } }>('/datasets/:datasetId', async (request, reply) => {
     const { datasetId } = request.params;
+    const isAdmin = request.user?.role === 'admin';
+    const params: unknown[] = [datasetId, datasetId];
+    const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, params);
 
     const result = await query<DatasetRow>(
-      'SELECT * FROM datasets WHERE (id = $1 OR name = $2) AND user_id = $3',
-      [datasetId, datasetId, request.user!.id]
+      `SELECT * FROM datasets WHERE (id = $1 OR name = $2) AND ${accessWhere}`,
+      params
     );
 
     if (!result.rows[0]) {
@@ -127,18 +145,19 @@ export const datasetsRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   /**
-   * DELETE /v2/datasets/:datasetId - Delete dataset (user-scoped)
+   * DELETE /v2/datasets/:datasetId - Delete dataset (user or team scoped)
    */
   fastify.delete<{ Params: { datasetId: string } }>(
     '/datasets/:datasetId',
     async (request, reply) => {
       const { datasetId } = request.params;
+      const isAdmin = request.user?.role === 'admin';
+      const params: unknown[] = [datasetId, datasetId];
+      const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, params);
 
-      // RETURNING id so we have the PG id even when the lookup happened
-      // by name — the S3 prefix is keyed on the dataset id, not the name.
       const result = await query<{ id: string }>(
-        'DELETE FROM datasets WHERE (id = $1 OR name = $2) AND user_id = $3 RETURNING id',
-        [datasetId, datasetId, request.user!.id]
+        `DELETE FROM datasets WHERE (id = $1 OR name = $2) AND ${accessWhere} RETURNING id`,
+        params
       );
       if (result.rowCount === 0) {
         reply.status(404);
@@ -146,19 +165,6 @@ export const datasetsRoutes: FastifyPluginAsync = async (fastify) => {
       }
       const deletedId = result.rows[0]!.id;
 
-      // Clean up S3 items immediately. Pre-fix, this DELETE handler only
-      // removed the PG row — operators clicked "delete" in the dashboard,
-      // the row disappeared from the grid, and the items continued to
-      // occupy S3 forever (silent storage leak). The retention reaper
-      // handles the lifecycle path via tombstones, but operator-initiated
-      // deletes never wrote one, so they never got reaped.
-      //
-      // Fire-and-forget at request-completion time: if S3 cleanup fails
-      // we still return 204 (PG is the source of truth — the dataset is
-      // gone from the user's view) and log the failure. Mirrors the
-      // retention path's "stale S3 prefix is just orphaned bytes,
-      // cleanable later by lifecycle policy or a future bookkeeping job"
-      // posture documented at retention.ts:200-203.
       try {
         await deleteDatasetS3Prefix(deletedId);
       } catch (err) {
