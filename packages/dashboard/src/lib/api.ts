@@ -5,10 +5,19 @@
  */
 
 export function getApiUrl(): string {
-  if (typeof window !== 'undefined' && (window as any).__ENV__?.NEXT_PUBLIC_API_URL) {
-    return (window as any).__ENV__.NEXT_PUBLIC_API_URL;
+  if (typeof window !== 'undefined') {
+    const runtimeUrl = (window as any).__ENV__?.NEXT_PUBLIC_API_URL;
+    if (typeof runtimeUrl === 'string' && runtimeUrl.trim() !== '') {
+      return runtimeUrl.trim().replace(/\/+$/, '');
+    }
+
+    const hostname = window.location.hostname;
+    if (hostname && hostname !== 'localhost' && hostname !== '127.0.0.1') {
+      return `${window.location.origin}/api`;
+    }
   }
-  return process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
+
+  return (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000').replace(/\/+$/, '');
 }
 
 /**
