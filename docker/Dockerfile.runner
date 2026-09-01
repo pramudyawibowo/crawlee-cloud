@@ -1,5 +1,5 @@
 # Multi-stage build for Runner service
-FROM node:lts-slim AS builder
+FROM node:lts-alpine AS builder
 
 WORKDIR /app
 
@@ -9,7 +9,7 @@ COPY packages/runner/package*.json ./packages/runner/
 COPY tsconfig.base.json ./
 
 # Install dependencies (ignore husky)
-RUN npm install --ignore-scripts
+RUN npm ci --workspace=@crawlee-cloud/runner --ignore-scripts
 
 # Copy source
 COPY packages/runner ./packages/runner
@@ -18,23 +18,19 @@ COPY packages/runner ./packages/runner
 RUN npm run build --workspace=@crawlee-cloud/runner
 
 # Production stage
-FROM node:lts-slim
-
-# Install Docker CLI for container management
-RUN apt-get update && apt-get install -y \
-  docker.io \
-  --no-install-recommends \
-  && rm -rf /var/lib/apt/lists/*
+FROM node:lts-alpine AS production
 
 WORKDIR /app
 
-# Copy built files and lock file
-COPY --from=builder /app/package*.json ./
+# Copy built files and package manifests
+COPY package*.json ./
+COPY packages/runner/package*.json ./packages/runner/
 COPY --from=builder /app/packages/runner/dist ./dist
-COPY --from=builder /app/packages/runner/package*.json ./packages/runner/
 
 # Install production dependencies only
-RUN npm install --omit=dev --ignore-scripts
+RUN npm ci --omit=dev --workspace=@crawlee-cloud/runner --ignore-scripts
+
+ENV NODE_ENV=production
 
 # Labels
 LABEL org.opencontainers.image.title="Crawlee Platform Runner"
