@@ -49,6 +49,40 @@ export async function authRoutes(app: FastifyInstance) {
   // Users can be invited by admin (future feature)
 
   /**
+   * Helper to extract clean proto and host behind multi-hop reverse proxies.
+   */
+  function extractProxyOrigin(request: {
+    headers: Record<string, string | string[] | undefined>;
+    protocol?: string;
+  }): {
+    proto: string;
+    host: string;
+    origin: string;
+  } {
+    const rawProto = request.headers['x-forwarded-proto'];
+    const protoStr =
+      typeof rawProto === 'string'
+        ? (rawProto.split(',')[0] ?? '').trim()
+        : Array.isArray(rawProto) && rawProto.length > 0 && typeof rawProto[0] === 'string'
+          ? rawProto[0].trim()
+          : '';
+    const proto = protoStr || (request.protocol?.startsWith('https') ? 'https' : 'http');
+
+    const rawHost = request.headers['x-forwarded-host'];
+    const hostStr =
+      typeof rawHost === 'string'
+        ? (rawHost.split(',')[0] ?? '').trim()
+        : Array.isArray(rawHost) && rawHost.length > 0 && typeof rawHost[0] === 'string'
+          ? rawHost[0].trim()
+          : '';
+    const host =
+      hostStr ||
+      (typeof request.headers.host === 'string' ? request.headers.host : 'localhost:3000');
+
+    return { proto, host, origin: `${proto}://${host}` };
+  }
+
+  /**
    * List available authentication providers.
    */
   app.get('/v2/auth/providers', async (_request, reply) => {
@@ -74,12 +108,8 @@ export async function authRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: { message: 'OIDC authentication is not enabled' } });
     }
 
-    const host =
-      (request.headers['x-forwarded-host'] as string) || request.headers.host || 'localhost:3000';
-    const proto =
-      (request.headers['x-forwarded-proto'] as string) ||
-      (request.protocol.startsWith('https') ? 'https' : 'http');
-    const defaultRedirectUri = `${proto}://${host}/v2/auth/oidc/callback`;
+    const { origin } = extractProxyOrigin(request);
+    const defaultRedirectUri = `${origin}/v2/auth/oidc/callback`;
     const redirectUri = oidcSettings.redirectUri || defaultRedirectUri;
 
     const query = request.query as { return_to?: string } | undefined;
@@ -115,12 +145,7 @@ export async function authRoutes(app: FastifyInstance) {
       error_description?: string;
     };
 
-    const host =
-      (request.headers['x-forwarded-host'] as string) || request.headers.host || 'localhost:3000';
-    const proto =
-      (request.headers['x-forwarded-proto'] as string) ||
-      (request.protocol.startsWith('https') ? 'https' : 'http');
-    const currentOrigin = `${proto}://${host}`;
+    const { origin: currentOrigin } = extractProxyOrigin(request);
 
     if (query.error) {
       const errorMsg = encodeURIComponent(query.error_description || query.error);
