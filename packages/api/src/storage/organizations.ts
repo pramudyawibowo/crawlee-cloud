@@ -262,7 +262,9 @@ export async function deleteOrganization(orgId: string): Promise<void> {
 }
 
 /**
- * Synchronize OIDC user groups into team/organization memberships automatically.
+ * Map user into existing organizations based on their OIDC group claims.
+ * NOTE: Does NOT auto-create organizations. Organizations must be created manually,
+ * and mapped via their `oidc_group` field.
  */
 export async function syncUserOidcGroups(userId: string, groupNames: string[]): Promise<void> {
   if (!groupNames || groupNames.length === 0) return;
@@ -271,36 +273,20 @@ export async function syncUserOidcGroups(userId: string, groupNames: string[]): 
     const groupName = (rawName || '').trim();
     if (!groupName) continue;
 
-    const slug = slugify(groupName);
-
     try {
-      // Find existing organization linked by oidc_group or matching slug
+      // Find EXISTING organization explicitly mapped to this oidc_group (case-insensitive)
       const found = await pool.query<OrganizationRow>(
-        'SELECT * FROM organizations WHERE oidc_group = $1 OR slug = $2',
-        [groupName, slug]
+        'SELECT id FROM organizations WHERE oidc_group IS NOT NULL AND LOWER(oidc_group) = LOWER($1)',
+        [groupName]
       );
 
-      let org = found.rows[0];
-      if (!org) {
-        // Auto-provision team organization for new OIDC group
-        const newOrgId = nanoid();
-        const insertRes = await pool.query<OrganizationRow>(
-          `INSERT INTO organizations (id, name, slug, description, oidc_group, created_at, modified_at)
-           VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
-           ON CONFLICT (slug) DO UPDATE SET oidc_group = EXCLUDED.oidc_group
-           RETURNING *`,
-          [newOrgId, groupName, slug, `Auto-synced from OIDC group: ${groupName}`, groupName]
-        );
-        org = insertRes.rows[0];
-      }
-
-      if (org) {
-        // Ensure user is added as member of this team
+      for (const org of found.rows) {
+        // Ensure user is enrolled as member in this mapped team
         await addOrganizationMember(org.id, userId, 'member');
       }
     } catch (err) {
       console.warn(
-        `[OIDC Group Sync] Failed to sync group "${groupName}" for user ${userId}:`,
+        `[OIDC Group Mapping] Failed to map group "${groupName}" for user ${userId}:`,
         err
       );
     }
