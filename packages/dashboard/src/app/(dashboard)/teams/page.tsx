@@ -465,6 +465,7 @@ export default function TeamsPage() {
                             toast.info('Switched workspace', {
                               description: `Now working inside ${orgDetail.name}`,
                             });
+                            window.location.reload();
                           }}
                           className="px-3 py-1 text-xs border border-signal/40 bg-signal/10 hover:bg-signal/20 text-signal rounded-sm transition-colors"
                         >

@@ -63,8 +63,8 @@ export function WorkspaceSwitcher() {
       toast.success('Team created', {
         description: `Switched to ${newOrg.name}`,
       });
-      // Soft refresh
-      router.refresh();
+      // Reload page to reflect new workspace state
+      window.location.reload();
     } catch (err) {
       toast.error('Failed to create team', {
         description: err instanceof Error ? err.message : 'Unknown error',
@@ -82,7 +82,7 @@ export function WorkspaceSwitcher() {
         ? `Switched to ${organizations.find((o) => o.id === orgId)?.name}`
         : 'Switched to Personal Workspace',
     });
-    router.refresh();
+    window.location.reload();
   }
 
   return (
