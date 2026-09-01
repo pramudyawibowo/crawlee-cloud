@@ -54,6 +54,18 @@ const DISCOVERY_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 const inMemoryStates = new Map<string, { data: OidcStateData; expiresAt: number }>();
 
 /**
+ * Normalize an OIDC issuer URL by trimming trailing slashes and stripping
+ * any appended /.well-known/openid-configuration path.
+ */
+export function normalizeIssuerUrl(url: string): string {
+  let clean = (url || '').trim().replace(/\/+$/, '');
+  if (clean.endsWith('/.well-known/openid-configuration')) {
+    clean = clean.slice(0, -'/.well-known/openid-configuration'.length).replace(/\/+$/, '');
+  }
+  return clean;
+}
+
+/**
  * Test connectivity to an OIDC issuer's discovery document.
  */
 export async function testOidcDiscovery(issuerUrl: string): Promise<{
@@ -61,12 +73,12 @@ export async function testOidcDiscovery(issuerUrl: string): Promise<{
   config?: OidcConfiguration;
   error?: string;
 }> {
-  if (!issuerUrl || !issuerUrl.trim()) {
+  const issuerBase = normalizeIssuerUrl(issuerUrl);
+  if (!issuerBase) {
     return { success: false, error: 'Issuer URL is required' };
   }
 
   try {
-    const issuerBase = issuerUrl.trim().replace(/\/+$/, '');
     const discoveryUrl = `${issuerBase}/.well-known/openid-configuration`;
 
     const res = await fetch(discoveryUrl, {
@@ -76,7 +88,7 @@ export async function testOidcDiscovery(issuerUrl: string): Promise<{
     if (!res.ok) {
       return {
         success: false,
-        error: `Discovery request failed with HTTP ${res.status} (${res.statusText})`,
+        error: `Discovery request to ${discoveryUrl} failed with HTTP ${res.status} (${res.statusText})`,
       };
     }
 
@@ -102,11 +114,11 @@ export async function testOidcDiscovery(issuerUrl: string): Promise<{
  */
 export async function getOidcConfiguration(): Promise<OidcConfiguration> {
   const oidcSettings = await getEffectiveOidcConfig();
-  if (!oidcSettings.issuerUrl) {
+  const issuerBase = normalizeIssuerUrl(oidcSettings.issuerUrl);
+  if (!issuerBase) {
     throw new Error('OIDC is not properly configured: Issuer URL is missing');
   }
 
-  const issuerBase = oidcSettings.issuerUrl.replace(/\/+$/, '');
   const now = Date.now();
   if (
     cachedDiscovery &&

@@ -218,17 +218,27 @@ export default function SettingsPage() {
     }
   }
 
+  function cleanIssuerUrl(url: string): string {
+    let clean = (url || '').trim().replace(/\/+$/, '');
+    if (clean.endsWith('/.well-known/openid-configuration')) {
+      clean = clean.slice(0, -'/.well-known/openid-configuration'.length).replace(/\/+$/, '');
+    }
+    return clean;
+  }
+
   async function handleTestOidc() {
-    if (!oidcForm.issuerUrl.trim()) {
+    const targetUrl = cleanIssuerUrl(oidcForm.issuerUrl);
+    if (!targetUrl) {
       toast.error('Please enter an OIDC Issuer URL first');
       return;
     }
 
+    setOidcForm((prev) => ({ ...prev, issuerUrl: targetUrl }));
     setOidcTesting(true);
     setOidcTestResult(null);
 
     try {
-      const res = await testOidcConnection(oidcForm.issuerUrl.trim());
+      const res = await testOidcConnection(targetUrl);
       if (res.success) {
         setOidcTestResult({
           success: true,
@@ -254,6 +264,7 @@ export default function SettingsPage() {
   async function handleSaveOidc() {
     setOidcSaving(true);
     try {
+      const targetUrl = cleanIssuerUrl(oidcForm.issuerUrl);
       const adminRoles = adminRolesInput
         .split(',')
         .map((r) => r.trim())
@@ -261,6 +272,7 @@ export default function SettingsPage() {
 
       const payload: Partial<OidcSettings> = {
         ...oidcForm,
+        issuerUrl: targetUrl,
         adminRoles,
       };
 
@@ -384,7 +396,7 @@ export default function SettingsPage() {
           {/* Issuer URL & Live Test */}
           <Field
             label="OIDC Issuer URL"
-            hint="Base URL containing .well-known/openid-configuration"
+            hint="Base domain or discovery URL (e.g. https://src.adsdigitalpartner.co.id)"
           >
             <div className="flex gap-2">
               <input
@@ -394,7 +406,7 @@ export default function SettingsPage() {
                   setOidcForm({ ...oidcForm, issuerUrl: e.target.value });
                   setOidcTestResult(null);
                 }}
-                placeholder="https://auth.company.com/realms/master"
+                placeholder="https://src.adsdigitalpartner.co.id"
                 className={INPUT_CLASS}
               />
               <button
