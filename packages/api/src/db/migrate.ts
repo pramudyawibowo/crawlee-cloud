@@ -425,6 +425,44 @@ CREATE TABLE IF NOT EXISTS system_settings (
   updated_at TIMESTAMPTZ DEFAULT NOW(),
   updated_by VARCHAR(21) REFERENCES users(id) ON DELETE SET NULL
 );
+
+-- Multi-Tenant Organizations & Teams
+CREATE TABLE IF NOT EXISTS organizations (
+  id VARCHAR(21) PRIMARY KEY,
+  name TEXT NOT NULL,
+  slug TEXT UNIQUE NOT NULL,
+  description TEXT,
+  oidc_group TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  modified_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS organization_members (
+  id VARCHAR(21) PRIMARY KEY,
+  org_id VARCHAR(21) NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  user_id VARCHAR(21) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role TEXT NOT NULL DEFAULT 'member',
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(org_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_org_members_user ON organization_members(user_id);
+CREATE INDEX IF NOT EXISTS idx_org_members_org ON organization_members(org_id);
+CREATE INDEX IF NOT EXISTS idx_orgs_oidc_group ON organizations(oidc_group) WHERE oidc_group IS NOT NULL;
+
+-- Multi-Tenant Resource Scoping
+ALTER TABLE actors ADD COLUMN IF NOT EXISTS org_id VARCHAR(21) REFERENCES organizations(id) ON DELETE CASCADE;
+ALTER TABLE datasets ADD COLUMN IF NOT EXISTS org_id VARCHAR(21) REFERENCES organizations(id) ON DELETE CASCADE;
+ALTER TABLE key_value_stores ADD COLUMN IF NOT EXISTS org_id VARCHAR(21) REFERENCES organizations(id) ON DELETE CASCADE;
+ALTER TABLE request_queues ADD COLUMN IF NOT EXISTS org_id VARCHAR(21) REFERENCES organizations(id) ON DELETE CASCADE;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS org_id VARCHAR(21) REFERENCES organizations(id) ON DELETE CASCADE;
+ALTER TABLE schedules ADD COLUMN IF NOT EXISTS org_id VARCHAR(21) REFERENCES organizations(id) ON DELETE CASCADE;
+ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS org_id VARCHAR(21) REFERENCES organizations(id) ON DELETE CASCADE;
+
+CREATE INDEX IF NOT EXISTS idx_actors_org ON actors(org_id) WHERE org_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_datasets_org ON datasets(org_id) WHERE org_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_runs_org ON runs(org_id) WHERE org_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_schedules_org ON schedules(org_id) WHERE org_id IS NOT NULL;
 `;
 
 export async function migrate(): Promise<void> {

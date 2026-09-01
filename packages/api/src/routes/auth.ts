@@ -34,6 +34,7 @@ import {
 } from '../auth/oidc.js';
 
 import { getEffectiveOidcConfig } from '../storage/settings.js';
+import { syncUserOidcGroups } from '../storage/organizations.js';
 
 const loginSchema = z.object({
   email: z.string().email(),
@@ -189,7 +190,12 @@ export async function authRoutes(app: FastifyInstance) {
       // 4. Auto-register or synchronize user
       const user = await findOrCreateOidcUser(profile, computedRole);
 
-      // 5. Issue Crawlee Cloud JWT token
+      // 5. Automatically sync OIDC groups/teams into Organizations
+      const rawGroups = extractRolesFromClaims(profile.rawClaims, 'groups');
+      const allGroups = Array.from(new Set([...userRoles, ...rawGroups]));
+      await syncUserOidcGroups(user.id, allGroups);
+
+      // 6. Issue Crawlee Cloud JWT token
       const token = createToken({
         userId: user.id,
         email: user.email,

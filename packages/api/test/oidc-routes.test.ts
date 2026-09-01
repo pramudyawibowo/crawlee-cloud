@@ -196,7 +196,7 @@ describe('OIDC Auth Routes', () => {
         'admin' // Mapped to admin because user has 'DevOps' role matching OIDC_ADMIN_ROLES
       );
       expect(response.headers.location).toBe(
-        'https://dashboard.example.com/auth/callback?token=mock_jwt_token_123'
+        'https://dashboard.example.com/callback?token=mock_jwt_token_123'
       );
     });
   });

@@ -19,10 +19,12 @@ import {
   ListOrdered,
   Cpu,
   Trash2,
+  Users,
 } from 'lucide-react';
 import { APP_VERSION } from '@/lib/constants';
 import { cn } from '@/lib/utils';
 import type { LucideIcon } from 'lucide-react';
+import { WorkspaceSwitcher } from '@/components/workspace-switcher';
 
 type Item = { href: string; label: string; icon: LucideIcon; soon?: boolean };
 type Group = { id: string; label: string; items: Item[] };
@@ -61,6 +63,11 @@ export const navGroups: Group[] = [
       { href: '/key-value-stores', label: 'KV Stores', icon: Boxes },
       { href: '/request-queues', label: 'Queues', icon: ListOrdered },
     ],
+  },
+  {
+    id: 'collab',
+    label: 'Workspace',
+    items: [{ href: '/teams', label: 'Teams & Org', icon: Users }],
   },
   {
     id: 'integrate',
@@ -237,6 +244,7 @@ export function Sidebar() {
   return (
     <aside className="hidden lg:flex w-60 shrink-0 flex-col h-screen sticky top-0 border-r border-border bg-surface-2">
       <BrandStrip />
+      <WorkspaceSwitcher />
       <NavContents />
       <OperatorFooter />
     </aside>

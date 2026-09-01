@@ -485,8 +485,15 @@ export async function getKVRecordPresignedUrl(
   }
 }
 
+function getActiveOrgId(): string | null {
+  if (typeof window === 'undefined') return null;
+  const org = localStorage.getItem('active_org_id');
+  return org && org !== 'personal' ? org : null;
+}
+
 async function fetchApi<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const token = getToken();
+  const orgId = getActiveOrgId();
 
   // Only claim a JSON body when we actually send one — Fastify rejects
   // Content-Type: application/json with an empty body
@@ -499,6 +506,10 @@ async function fetchApi<T>(endpoint: string, options: RequestInit = {}): Promise
 
   if (token) {
     (headers as Record<string, string>)['Authorization'] = `Bearer ${token}`;
+  }
+
+  if (orgId) {
+    (headers as Record<string, string>)['x-org-id'] = orgId;
   }
 
   const res = await fetch(`${getApiUrl()}${endpoint}`, {
@@ -1340,4 +1351,113 @@ export async function updateExecutionSettings(
     body: JSON.stringify(payload),
   });
   return res.data;
+}
+
+// ---------------------------------------------------------------------------
+// Organizations & Teams API
+// ---------------------------------------------------------------------------
+
+export type OrgRole = 'owner' | 'admin' | 'member' | 'viewer';
+
+export interface Organization {
+  id: string;
+  name: string;
+  slug: string;
+  description: string | null;
+  oidc_group: string | null;
+  member_role?: OrgRole;
+  member_count?: number;
+  created_at: string;
+  modified_at: string;
+}
+
+export interface OrganizationMember {
+  id: string;
+  org_id: string;
+  user_id: string;
+  role: OrgRole;
+  created_at: string;
+  user_email?: string;
+  user_name?: string | null;
+}
+
+export interface OrganizationDetail extends Organization {
+  myRole: OrgRole;
+  members: OrganizationMember[];
+}
+
+export async function getOrganizations(): Promise<{ items: Organization[] }> {
+  const res = await fetchApi<{ data: { items: Organization[] } }>('/v2/organizations');
+  return res.data;
+}
+
+export async function getOrganization(id: string): Promise<OrganizationDetail> {
+  const res = await fetchApi<{ data: OrganizationDetail }>(`/v2/organizations/${id}`);
+  return res.data;
+}
+
+export async function createOrganization(payload: {
+  name: string;
+  slug?: string;
+  description?: string;
+  oidcGroup?: string;
+}): Promise<Organization> {
+  const res = await fetchApi<{ data: Organization }>('/v2/organizations', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+  return res.data;
+}
+
+export async function updateOrganization(
+  id: string,
+  payload: {
+    name?: string;
+    slug?: string;
+    description?: string;
+    oidcGroup?: string;
+  }
+): Promise<Organization> {
+  const res = await fetchApi<{ data: Organization }>(`/v2/organizations/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+  return res.data;
+}
+
+export async function deleteOrganization(id: string): Promise<void> {
+  await fetchApi(`/v2/organizations/${id}`, {
+    method: 'DELETE',
+  });
+}
+
+export async function addOrgMember(
+  orgId: string,
+  email: string,
+  role: OrgRole = 'member'
+): Promise<{ member: OrganizationMember; members: OrganizationMember[] }> {
+  const res = await fetchApi<{
+    data: { member: OrganizationMember; members: OrganizationMember[] };
+  }>(`/v2/organizations/${orgId}/members`, {
+    method: 'POST',
+    body: JSON.stringify({ email, role }),
+  });
+  return res.data;
+}
+
+export async function updateOrgMemberRole(
+  orgId: string,
+  memberUserId: string,
+  role: OrgRole
+): Promise<void> {
+  await fetchApi(`/v2/organizations/${orgId}/members/${memberUserId}`, {
+    method: 'PUT',
+    body: JSON.stringify({ role }),
+  });
+}
+
+export async function removeOrgMember(orgId: string, memberUserId: string): Promise<void> {
+  await fetchApi(`/v2/organizations/${orgId}/members/${memberUserId}`, {
+    method: 'DELETE',
+  });
 }
