@@ -1,16 +1,34 @@
 services:
   # ===========================================
+  # DATABASE MIGRATION (One-shot)
+  # ===========================================
+
+  migrate:
+    image: ${API_IMAGE:-ghcr.io/crawlee-cloud/crawlee-cloud-api:latest}
+    command: ['node', 'packages/api/dist/db/migrate.js']
+    environment:
+      - NODE_ENV=development
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/crawlee_cloud
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - crawlee-network
+    restart: 'no'
+
+  # ===========================================
   # CORE SERVICES
   # ===========================================
 
   api:
-    image: ${API_IMAGE:-ghcr.io/pramudyawibowo/crawlee-cloud-api:latest}
+    image: ${API_IMAGE:-ghcr.io/crawlee-cloud/crawlee-cloud-api:latest}
     ports:
       - '3000:3000'
     environment:
       # Use 'development' for docker-compose local dev; set to 'production' with real secrets in actual deployment
       - NODE_ENV=development
       - PORT=3000
+      - PROXY_ENCRYPTION_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/crawlee_cloud
       - REDIS_URL=redis://redis:6379
       - S3_ENDPOINT=http://minio:9000
@@ -23,11 +41,12 @@ services:
       - API_SECRET=docker-compose-dev-secret-32chars-change-me
       # CORS origins whitelist
       - CORS_ORIGINS=http://localhost:3000,http://localhost:3001,http://dashboard:3001
-      - RATE_LIMIT_MAX=1000
       - LOG_LEVEL=info
       - ADMIN_EMAIL=admin@crawlee.cloud
       - ADMIN_PASSWORD=crawlee.cloud
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
@@ -39,15 +58,16 @@ services:
     restart: unless-stopped
 
   runner:
-    image: ${RUNNER_IMAGE:-ghcr.io/pramudyawibowo/crawlee-cloud-runner:latest}
+    image: ${RUNNER_IMAGE:-ghcr.io/crawlee-cloud/crawlee-cloud-runner:latest}
     environment:
       - NODE_ENV=development
+      - PROXY_ENCRYPTION_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
       - API_BASE_URL=http://api:3000
       - API_TOKEN=runner-token
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/crawlee_cloud
       - REDIS_URL=redis://redis:6379
       - DOCKER_SOCKET=/var/run/docker.sock
-      - DOCKER_NETWORK=crawlee-platfrom_crawlee-network
+      - DOCKER_NETWORK=crawlee-network
       - MAX_CONCURRENT_RUNS=10
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -60,7 +80,7 @@ services:
     restart: unless-stopped
 
   dashboard:
-    image: ${DASHBOARD_IMAGE:-ghcr.io/pramudyawibowo/crawlee-cloud-dashboard:latest}
+    image: ${DASHBOARD_IMAGE:-ghcr.io/crawlee-cloud/crawlee-cloud-dashboard:latest}
     ports:
       - '3001:3001'
     environment:
@@ -69,28 +89,6 @@ services:
       - NEXT_PUBLIC_API_URL=http://localhost:3000
     depends_on:
       - api
-    networks:
-      - crawlee-network
-    restart: unless-stopped
-
-  scheduler:
-    image: ${API_IMAGE:-ghcr.io/pramudyawibowo/crawlee-cloud-api:latest}
-    command: ['node', 'packages/api/dist/scheduler.js']
-    environment:
-      - NODE_ENV=development
-      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/crawlee_cloud
-      - REDIS_URL=redis://redis:6379
-      - S3_ENDPOINT=http://minio:9000
-      - S3_ACCESS_KEY=minioadmin
-      - S3_SECRET_KEY=minioadmin
-      - S3_BUCKET=crawlee-cloud
-      - S3_REGION=us-east-1
-      - S3_FORCE_PATH_STYLE=true
-      - API_SECRET=docker-compose-dev-secret-32chars-change-me
-      - CORS_ORIGINS=http://localhost:3000,http://localhost:3001
-    depends_on:
-      - api
-      - redis
     networks:
       - crawlee-network
     restart: unless-stopped
