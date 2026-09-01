@@ -142,6 +142,24 @@ npm run dev
 
 The API server starts at `http://localhost:3000`.
 
+### 5. Or Run via Docker Compose (GHCR Pre-built Images)
+
+No local compilation required — just pull and run:
+
+```bash
+# Pull latest pre-built images from GHCR
+docker compose pull
+
+# Start all services
+docker compose up -d
+```
+
+> **Note:** If you want to build locally from source code instead of using pre-built images, run:
+>
+> ```bash
+> docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
+> ```
+
 ---
 
 ## Deploy

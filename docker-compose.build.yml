@@ -1,0 +1,24 @@
+# Docker Compose override for building images locally from source code
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+
+  runner:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.runner
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dashboard
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
