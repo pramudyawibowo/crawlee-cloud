@@ -108,8 +108,18 @@ export async function authRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: { message: 'OIDC authentication is not enabled' } });
     }
 
-    const { origin } = extractProxyOrigin(request);
-    const defaultRedirectUri = `${origin}/v2/auth/oidc/callback`;
+    const { origin, host } = extractProxyOrigin(request);
+    const rawPrefix =
+      typeof request.headers['x-forwarded-prefix'] === 'string'
+        ? request.headers['x-forwarded-prefix'].trim()
+        : '';
+    const prefix = rawPrefix
+      ? (rawPrefix.startsWith('/') ? rawPrefix : `/${rawPrefix}`).replace(/\/+$/, '')
+      : host.includes('localhost') || host.includes('127.0.0.1')
+        ? ''
+        : '/api';
+
+    const defaultRedirectUri = `${origin}${prefix}/v2/auth/oidc/callback`;
     const redirectUri = oidcSettings.redirectUri || defaultRedirectUri;
 
     const query = request.query as { return_to?: string } | undefined;
