@@ -26,19 +26,19 @@ jobs:
       matrix:
         service:
           - name: api
-            image_name: crawlee-cloud-api
+            image_name: api
             dockerfile: docker/Dockerfile.api
             context: .
           - name: runner
-            image_name: crawlee-cloud-runner
+            image_name: runner
             dockerfile: docker/Dockerfile.runner
             context: .
           - name: dashboard
-            image_name: crawlee-cloud-dashboard
+            image_name: dashboard
             dockerfile: docker/Dockerfile.dashboard
             context: .
           - name: actor-base
-            image_name: crawlee-cloud-actor-base
+            image_name: actor-base
             dockerfile: docker/Dockerfile.actor-base
             context: .
 
