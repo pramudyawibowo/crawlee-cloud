@@ -36,9 +36,11 @@ import {
 } from '@/lib/api';
 import { useToast } from '@/components/ui/toast';
 import { useConfirm } from '@/components/ui/confirm';
+import { useAuth } from '@/lib/auth';
 
 export default function TeamsPage() {
   const { organizations, activeOrgId, setActiveOrgId, refreshOrganizations } = useWorkspace();
+  const { user } = useAuth();
   const toast = useToast();
   const confirm = useConfirm();
 
@@ -109,8 +111,23 @@ export default function TeamsPage() {
     }
   }, [selectedOrgId, loadOrgDetail]);
 
-  const canManage = orgDetail?.myRole === 'owner' || orgDetail?.myRole === 'admin';
-  const isOwner = orgDetail?.myRole === 'owner';
+  const isSystemAdmin = user?.role === 'admin';
+  const hasOwner = orgDetail?.members?.some((m) => m.role === 'owner');
+  const isSingleMember = (orgDetail?.members?.length ?? 0) <= 1;
+
+  const canManage =
+    isSystemAdmin ||
+    orgDetail?.myRole === 'owner' ||
+    orgDetail?.myRole === 'admin' ||
+    !hasOwner ||
+    isSingleMember;
+
+  const canDelete =
+    isSystemAdmin ||
+    orgDetail?.myRole === 'owner' ||
+    orgDetail?.myRole === 'admin' ||
+    !hasOwner ||
+    isSingleMember;
 
   async function handleCreateTeam(e: React.FormEvent) {
     e.preventDefault();
@@ -170,10 +187,9 @@ export default function TeamsPage() {
     }
   }
 
-  async function handleDeleteTeam() {
-    if (!selectedOrgId || !orgDetail) return;
+  async function handleDeleteSpecificTeam(orgId: string, orgName: string) {
     const ok = await confirm({
-      title: `Delete team "${orgDetail.name}"?`,
+      title: `Delete team "${orgName}"?`,
       description:
         'This action is irreversible. All team members, shared actors, datasets, and execution runs owned by this team will be permanently deleted.',
       confirmLabel: 'Delete Team',
@@ -183,18 +199,27 @@ export default function TeamsPage() {
     if (!ok) return;
 
     try {
-      await deleteOrganization(selectedOrgId);
+      await deleteOrganization(orgId);
       toast.success('Team deleted', {
-        description: `Team ${orgDetail.name} has been removed`,
+        description: `Team "${orgName}" has been removed`,
       });
-      setSelectedOrgId(null);
-      setActiveOrgId(null);
+      if (selectedOrgId === orgId) {
+        setSelectedOrgId(null);
+      }
+      if (activeOrgId === orgId) {
+        setActiveOrgId(null);
+      }
       await refreshOrganizations();
     } catch (err) {
       toast.error('Failed to delete team', {
         description: err instanceof Error ? err.message : 'Unknown error',
       });
     }
+  }
+
+  async function handleDeleteTeam() {
+    if (!selectedOrgId || !orgDetail) return;
+    await handleDeleteSpecificTeam(selectedOrgId, orgDetail.name);
   }
 
   async function handleInviteMember(e: React.FormEvent) {
@@ -358,16 +383,18 @@ export default function TeamsPage() {
               const isSelected = selectedOrgId === org.id;
               const isActive = activeOrgId === org.id;
               return (
-                <button
+                <div
                   key={org.id}
-                  onClick={() => setSelectedOrgId(org.id)}
-                  className={`w-full flex items-center justify-between p-2.5 rounded-sm text-left transition-colors ${
+                  className={`group w-full flex items-center justify-between p-2.5 rounded-sm transition-colors ${
                     isSelected
                       ? 'bg-secondary/80 border border-border text-foreground'
                       : 'hover:bg-secondary/40 text-muted-foreground hover:text-foreground'
                   }`}
                 >
-                  <div className="min-w-0 flex items-center gap-2">
+                  <button
+                    onClick={() => setSelectedOrgId(org.id)}
+                    className="min-w-0 flex-1 flex items-center gap-2 text-left"
+                  >
                     <Building2 className="h-4 w-4 shrink-0 text-muted-foreground" />
                     <div className="min-w-0">
                       <p className="text-xs font-semibold truncate leading-none">{org.name}</p>
@@ -375,13 +402,26 @@ export default function TeamsPage() {
                         {org.member_role || 'member'} · {org.member_count || 1} members
                       </p>
                     </div>
+                  </button>
+
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {isActive && (
+                      <span className="text-[9px] px-1.5 py-0.5 rounded-sm bg-signal/10 border border-signal/30 text-signal uppercase tracking-wider">
+                        Active
+                      </span>
+                    )}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void handleDeleteSpecificTeam(org.id, org.name);
+                      }}
+                      className="opacity-0 group-hover:opacity-100 p-1 hover:text-fail text-muted-foreground transition-opacity"
+                      title={`Delete team "${org.name}"`}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
                   </div>
-                  {isActive && (
-                    <span className="text-[9px] px-1.5 py-0.5 rounded-sm bg-signal/10 border border-signal/30 text-signal uppercase tracking-wider shrink-0">
-                      Active
-                    </span>
-                  )}
-                </button>
+                </div>
               );
             })}
           </div>
@@ -450,13 +490,14 @@ export default function TeamsPage() {
                           <Settings className="h-4 w-4" />
                         </button>
                       )}
-                      {isOwner && (
+                      {canDelete && (
                         <button
                           onClick={handleDeleteTeam}
-                          className="p-1.5 border border-border hover:bg-fail/10 rounded-sm text-muted-foreground hover:text-fail transition-colors"
+                          className="flex items-center gap-1 px-2 py-1 border border-fail/30 bg-fail/10 hover:bg-fail/20 rounded-sm text-fail transition-colors text-xs"
                           title="Delete Team"
                         >
-                          <Trash2 className="h-4 w-4" />
+                          <Trash2 className="h-3.5 w-3.5" />
+                          <span>Delete</span>
                         </button>
                       )}
                     </div>

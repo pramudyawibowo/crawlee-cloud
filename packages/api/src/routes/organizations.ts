@@ -121,7 +121,11 @@ export const organizationsRoutes: FastifyPluginAsync = async (fastify) => {
     const body = updateOrgSchema.parse(request.body);
 
     const hasAccess = await verifyOrgAccess(userId, id, 'admin');
-    if (!hasAccess && request.user?.role !== 'admin') {
+    const members = await getOrganizationMembers(id);
+    const hasOwner = members.some((m) => m.role === 'owner');
+    const isMember = members.some((m) => m.user_id === userId);
+
+    if (!hasAccess && request.user?.role !== 'admin' && !(isMember && !hasOwner)) {
       return reply.status(403).send({ error: { message: 'Admin or Owner privileges required' } });
     }
 
@@ -136,17 +140,24 @@ export const organizationsRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   /**
-   * DELETE /v2/organizations/:id - Delete organization (owner only)
+   * DELETE /v2/organizations/:id - Delete organization (owner, admin, or any member if no owner)
    */
   fastify.delete('/organizations/:id', async (request, reply) => {
     const userId = request.user!.id;
     const { id } = request.params as { id: string };
 
     const isOwner = await verifyOrgAccess(userId, id, 'owner');
-    if (!isOwner && request.user?.role !== 'admin') {
+    const isAdmin = await verifyOrgAccess(userId, id, 'admin');
+    const members = await getOrganizationMembers(id);
+    const hasOwner = members.some((m) => m.role === 'owner');
+    const isMember = members.some((m) => m.user_id === userId);
+
+    if (!isOwner && !isAdmin && request.user?.role !== 'admin' && !(isMember && !hasOwner)) {
       return reply
         .status(403)
-        .send({ error: { message: 'Only the Organization Owner can delete it' } });
+        .send({
+          error: { message: 'Owner or Admin privileges required to delete this organization' },
+        });
     }
 
     await deleteOrganization(id);
