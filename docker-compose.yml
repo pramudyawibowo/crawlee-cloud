@@ -4,7 +4,7 @@ services:
   # ===========================================
 
   api:
-    image: ${API_IMAGE:-ghcr.io/pramudyawibowo/api:latest}
+    image: ${API_IMAGE:-ghcr.io/pramudyawibowo/crawlee-cloud-api:latest}
     ports:
       - '3000:3000'
     environment:
@@ -39,7 +39,7 @@ services:
     restart: unless-stopped
 
   runner:
-    image: ${RUNNER_IMAGE:-ghcr.io/pramudyawibowo/runner:latest}
+    image: ${RUNNER_IMAGE:-ghcr.io/pramudyawibowo/crawlee-cloud-runner:latest}
     environment:
       - NODE_ENV=development
       - API_BASE_URL=http://api:3000
@@ -60,7 +60,7 @@ services:
     restart: unless-stopped
 
   dashboard:
-    image: ${DASHBOARD_IMAGE:-ghcr.io/pramudyawibowo/dashboard:latest}
+    image: ${DASHBOARD_IMAGE:-ghcr.io/pramudyawibowo/crawlee-cloud-dashboard:latest}
     ports:
       - '3001:3001'
     environment:
@@ -74,7 +74,7 @@ services:
     restart: unless-stopped
 
   scheduler:
-    image: ${API_IMAGE:-ghcr.io/pramudyawibowo/api:latest}
+    image: ${API_IMAGE:-ghcr.io/pramudyawibowo/crawlee-cloud-api:latest}
     command: ['node', 'packages/api/dist/scheduler.js']
     environment:
       - NODE_ENV=development
