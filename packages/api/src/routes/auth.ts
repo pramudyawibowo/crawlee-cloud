@@ -200,7 +200,7 @@ export async function authRoutes(app: FastifyInstance) {
       const targetBase = stateData.returnTo
         ? stateData.returnTo.replace(/\/+$/, '')
         : currentOrigin;
-      return reply.redirect(`${targetBase}/auth/callback?token=${encodeURIComponent(token)}`);
+      return reply.redirect(`${targetBase}/callback?token=${encodeURIComponent(token)}`);
     } catch (err: unknown) {
       request.log.error(err, 'OIDC callback processing failed');
       const message = encodeURIComponent(

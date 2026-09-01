@@ -21,7 +21,7 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-const PUBLIC_PATHS = ['/login', '/register'];
+const PUBLIC_PATHS = ['/login', '/register', '/callback', '/auth/callback'];
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const router = useRouter();
