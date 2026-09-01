@@ -1,7 +1,7 @@
 # Base image for user Actors
 # Pre-configured with Node.js, Chrome, and common dependencies
 
-FROM node:20-slim
+FROM node:lts-slim
 
 # Install Chrome and dependencies for Playwright/Puppeteer
 RUN apt-get update && apt-get install -y \
