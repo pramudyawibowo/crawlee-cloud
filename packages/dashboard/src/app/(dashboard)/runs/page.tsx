@@ -41,10 +41,11 @@ import { useToast } from '@/components/ui/toast';
   can't be mistaken for "all the data".
 */
 
-type StatusGroup = 'all' | 'running' | 'succeeded' | 'failed' | 'aborted';
+type StatusGroup = 'all' | 'queued' | 'running' | 'succeeded' | 'failed' | 'aborted';
 
 const STATUS_GROUPS: Record<Exclude<StatusGroup, 'all'>, Run['status'][]> = {
-  running: ['RUNNING', 'READY'],
+  queued: ['READY'],
+  running: ['RUNNING'],
   succeeded: ['SUCCEEDED'],
   failed: ['FAILED', 'TIMED-OUT'],
   aborted: ['ABORTING', 'ABORTED'],
@@ -85,6 +86,7 @@ export default function RunsPage() {
   const [offset, setOffset] = useState(0);
   const [counts, setCounts] = useState<Record<StatusGroup, number>>({
     all: 0,
+    queued: 0,
     running: 0,
     succeeded: 0,
     failed: 0,
@@ -171,6 +173,7 @@ export default function RunsPage() {
     const [all, ...groups] = await Promise.all([allP, ...groupPs]);
     const next: Record<StatusGroup, number> = {
       all: all.total,
+      queued: 0,
       running: 0,
       succeeded: 0,
       failed: 0,
@@ -460,6 +463,7 @@ export default function RunsPage() {
           {(
             [
               { id: 'all', label: 'All', tone: '' },
+              { id: 'queued', label: 'Queued', tone: 'warn' },
               { id: 'running', label: 'Running', tone: 'info' },
               { id: 'succeeded', label: 'Succeeded', tone: 'signal' },
               { id: 'failed', label: 'Failed', tone: 'fail' },
