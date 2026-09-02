@@ -1060,9 +1060,9 @@ export async function maybeRetryRun(
           `Scheduling retry ${newRetryCount}/${maxRetries} for run ${runId} as ${newRunId}`
         );
         await client.query(
-          `INSERT INTO runs (id, actor_id, user_id, status, default_dataset_id, default_key_value_store_id,
+          `INSERT INTO runs (id, actor_id, user_id, org_id, status, default_dataset_id, default_key_value_store_id,
             default_request_queue_id, timeout_secs, memory_mbytes, retry_count, origin_run_id, run_after)
-           VALUES ($1, $2, (SELECT user_id FROM runs WHERE id = $3), 'READY',
+           VALUES ($1, $2, (SELECT user_id FROM runs WHERE id = $3), (SELECT org_id FROM runs WHERE id = $3), 'READY',
             $4, $5, $6, $7, $8, $9, $10,
             NOW() + INTERVAL '1 second' * $11)`,
           [

@@ -106,7 +106,10 @@ function RunDetail() {
         // operators click "View raw" → streaming download endpoint.
         const [r, l] = await Promise.all([
           getRun(id),
-          getRunLogs(id, { limit: LOG_TAIL_LIMIT, tail: true }),
+          getRunLogs(id, { limit: LOG_TAIL_LIMIT, tail: true }).catch((err) => {
+            console.warn('Failed to load run logs', err);
+            return { items: [], total: 0, offset: 0, limit: LOG_TAIL_LIMIT, count: 0 };
+          }),
         ]);
         if (!alive) return;
         setRun(r);

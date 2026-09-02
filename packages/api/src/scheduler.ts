@@ -119,8 +119,9 @@ async function triggerScheduledRun(schedule: ScheduleRow): Promise<void> {
     // bail before creating storage rows + an S3 write that would orphan
     // when the downstream `runs` INSERT fails its actor_id FK check.
     const actorRow = await query<{
+      org_id: string | null;
       default_run_options: { timeoutSecs?: number; memoryMbytes?: number } | null;
-    }>('SELECT default_run_options FROM actors WHERE id = $1', [schedule.actor_id]);
+    }>('SELECT org_id, default_run_options FROM actors WHERE id = $1', [schedule.actor_id]);
     if (!actorRow.rows[0]) {
       console.error(
         `Schedule ${schedule.id} references missing actor ${schedule.actor_id}; skipping (consider deleting the schedule)`
@@ -130,31 +131,37 @@ async function triggerScheduledRun(schedule: ScheduleRow): Promise<void> {
     const actorDefaults = actorRow.rows[0].default_run_options ?? null;
     const timeoutSecs = actorDefaults?.timeoutSecs ?? 3600;
     const memoryMbytes = actorDefaults?.memoryMbytes ?? 1024;
+    const orgId =
+      (schedule as { org_id?: string | null }).org_id ?? actorRow.rows[0].org_id ?? null;
 
     // Create default storages
-    await query('INSERT INTO datasets (id, user_id) VALUES ($1, $2)', [
+    await query('INSERT INTO datasets (id, user_id, org_id) VALUES ($1, $2, $3)', [
       datasetId,
       schedule.user_id,
+      orgId,
     ]);
-    await query('INSERT INTO key_value_stores (id, user_id) VALUES ($1, $2)', [
+    await query('INSERT INTO key_value_stores (id, user_id, org_id) VALUES ($1, $2, $3)', [
       kvStoreId,
       schedule.user_id,
+      orgId,
     ]);
-    await query('INSERT INTO request_queues (id, user_id) VALUES ($1, $2)', [
+    await query('INSERT INTO request_queues (id, user_id, org_id) VALUES ($1, $2, $3)', [
       requestQueueId,
       schedule.user_id,
+      orgId,
     ]);
 
     const { putKVRecord } = await import('./storage/s3.js');
     await putKVRecord(kvStoreId, 'INPUT', JSON.stringify(schedule.input ?? {}), 'application/json');
 
     await query(
-      `INSERT INTO runs (id, actor_id, user_id, status, default_dataset_id, default_key_value_store_id, default_request_queue_id, timeout_secs, memory_mbytes)
-       VALUES ($1, $2, $3, 'READY', $4, $5, $6, $7, $8)`,
+      `INSERT INTO runs (id, actor_id, user_id, org_id, status, default_dataset_id, default_key_value_store_id, default_request_queue_id, timeout_secs, memory_mbytes)
+       VALUES ($1, $2, $3, $4, 'READY', $5, $6, $7, $8, $9)`,
       [
         runId,
         schedule.actor_id,
         schedule.user_id,
+        orgId,
         datasetId,
         kvStoreId,
         requestQueueId,

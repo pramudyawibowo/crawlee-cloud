@@ -463,6 +463,36 @@ CREATE INDEX IF NOT EXISTS idx_actors_org ON actors(org_id) WHERE org_id IS NOT 
 CREATE INDEX IF NOT EXISTS idx_datasets_org ON datasets(org_id) WHERE org_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_runs_org ON runs(org_id) WHERE org_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_schedules_org ON schedules(org_id) WHERE org_id IS NOT NULL;
+
+-- Backfill org_id from parent actors to runs where org_id is NULL
+UPDATE runs r
+SET org_id = a.org_id
+FROM actors a
+WHERE r.actor_id = a.id AND r.org_id IS NULL AND a.org_id IS NOT NULL;
+
+-- Backfill org_id from runs to datasets where org_id is NULL
+UPDATE datasets d
+SET org_id = r.org_id
+FROM runs r
+WHERE r.default_dataset_id = d.id AND d.org_id IS NULL AND r.org_id IS NOT NULL;
+
+-- Backfill org_id from runs to key_value_stores where org_id is NULL
+UPDATE key_value_stores k
+SET org_id = r.org_id
+FROM runs r
+WHERE r.default_key_value_store_id = k.id AND k.org_id IS NULL AND r.org_id IS NOT NULL;
+
+-- Backfill org_id from runs to request_queues where org_id is NULL
+UPDATE request_queues q
+SET org_id = r.org_id
+FROM runs r
+WHERE r.default_request_queue_id = q.id AND q.org_id IS NULL AND r.org_id IS NOT NULL;
+
+-- Backfill org_id from runs to webhooks where org_id is NULL
+UPDATE webhooks w
+SET org_id = r.org_id
+FROM runs r
+WHERE w.run_id = r.id AND w.org_id IS NULL AND r.org_id IS NOT NULL;
 `;
 
 export async function migrate(): Promise<void> {

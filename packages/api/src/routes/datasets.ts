@@ -186,11 +186,14 @@ export const datasetsRoutes: FastifyPluginAsync = async (fastify) => {
     Querystring: { offset?: string; limit?: string; desc?: string; download?: string };
   }>('/datasets/:datasetId/items', async (request, reply) => {
     const { datasetId } = request.params;
+    const isAdmin = request.user?.role === 'admin';
+    const params: unknown[] = [datasetId, datasetId];
+    const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, params);
 
-    // Get dataset to confirm it exists and belongs to user
+    // Get dataset to confirm it exists and belongs to user or team
     const dataset = await query<DatasetRow>(
-      'SELECT * FROM datasets WHERE (id = $1 OR name = $2) AND user_id = $3',
-      [datasetId, datasetId, request.user!.id]
+      `SELECT * FROM datasets WHERE (id = $1 OR name = $2) AND ${accessWhere}`,
+      params
     );
 
     if (!dataset.rows[0]) {
@@ -315,10 +318,14 @@ export const datasetsRoutes: FastifyPluginAsync = async (fastify) => {
       }
     }
 
-    // Get or create dataset (user-scoped)
+    const isAdmin = request.user?.role === 'admin';
+    const params: unknown[] = [datasetId, datasetId];
+    const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, params);
+
+    // Get or create dataset (user or team scoped)
     let dataset = await query<DatasetRow>(
-      'SELECT * FROM datasets WHERE (id = $1 OR name = $2) AND user_id = $3',
-      [datasetId, datasetId, request.user!.id]
+      `SELECT * FROM datasets WHERE (id = $1 OR name = $2) AND ${accessWhere}`,
+      params
     );
 
     if (!dataset.rows[0]) {
@@ -328,10 +335,12 @@ export const datasetsRoutes: FastifyPluginAsync = async (fastify) => {
         `INSERT INTO datasets (id, name, user_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
         [id, datasetId === 'default' ? null : datasetId, request.user!.id]
       );
-      dataset = await query<DatasetRow>('SELECT * FROM datasets WHERE id = $1 AND user_id = $2', [
-        id,
-        request.user!.id,
-      ]);
+      const recheckParams: unknown[] = [id, id];
+      const recheckAccess = buildResourceAccessWhere(request.user!.id, isAdmin, recheckParams);
+      dataset = await query<DatasetRow>(
+        `SELECT * FROM datasets WHERE (id = $1 OR name = $2) AND ${recheckAccess}`,
+        recheckParams
+      );
     }
 
     const ds = dataset.rows[0]!;

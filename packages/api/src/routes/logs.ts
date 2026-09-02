@@ -9,17 +9,20 @@ import type { FastifyPluginAsync, RouteHandler } from 'fastify';
 import { redis } from '../storage/redis.js';
 import { query } from '../db/index.js';
 import { authenticate } from '../auth/middleware.js';
+import { buildResourceAccessWhere } from '../auth/workspace.js';
 
 export const logsRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.addHook('preHandler', authenticate);
 
   /**
-   * Verify run ownership before log access
+   * Verify run access (by ownership, org membership, or system admin) before log access
    */
-  async function verifyRunOwnership(runId: string, userId: string): Promise<boolean> {
+  async function verifyRunAccess(runId: string, userId: string, isAdmin = false): Promise<boolean> {
+    const params: unknown[] = [runId];
+    const accessWhere = buildResourceAccessWhere(userId, isAdmin, params);
     const result = await query<{ id: string }>(
-      'SELECT id FROM runs WHERE id = $1 AND user_id = $2',
-      [runId, userId]
+      `SELECT id FROM runs WHERE id = $1 AND ${accessWhere}`,
+      params
     );
     return result.rows.length > 0;
   }
@@ -32,9 +35,10 @@ export const logsRoutes: FastifyPluginAsync = async (fastify) => {
     Body: { message: string; level?: string; timestamp?: string };
   }>('/actor-runs/:runId/logs', async (request, reply) => {
     const { runId } = request.params;
+    const isAdmin = request.user?.role === 'admin';
 
-    // Verify run ownership
-    if (!(await verifyRunOwnership(runId, request.user!.id))) {
+    // Verify run access
+    if (!(await verifyRunAccess(runId, request.user!.id, isAdmin))) {
       reply.status(404);
       return { error: { type: 'record-not-found', message: 'Run not found' } };
     }
@@ -60,16 +64,17 @@ export const logsRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   /**
-   * GET /v2/actor-runs/:runId/logs - Get stored logs (user-scoped)
+   * GET /v2/actor-runs/:runId/logs - Get stored logs (user or team scoped)
    */
   fastify.get<{
     Params: { runId: string };
     Querystring: { offset?: string; limit?: string; tail?: string };
   }>('/actor-runs/:runId/logs', async (request, reply) => {
     const { runId } = request.params;
+    const isAdmin = request.user?.role === 'admin';
 
-    // Verify run ownership
-    if (!(await verifyRunOwnership(runId, request.user!.id))) {
+    // Verify run access
+    if (!(await verifyRunAccess(runId, request.user!.id, isAdmin))) {
       reply.status(404);
       return { error: { type: 'record-not-found', message: 'Run not found' } };
     }
@@ -127,8 +132,9 @@ export const logsRoutes: FastifyPluginAsync = async (fastify) => {
    */
   const rawLogHandler: RouteHandler<{ Params: { runId: string } }> = async (request, reply) => {
     const { runId } = request.params;
+    const isAdmin = request.user?.role === 'admin';
 
-    if (!(await verifyRunOwnership(runId, request.user!.id))) {
+    if (!(await verifyRunAccess(runId, request.user!.id, isAdmin))) {
       reply.status(404);
       return { error: { type: 'record-not-found', message: 'Run not found' } };
     }

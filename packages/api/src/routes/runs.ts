@@ -304,6 +304,9 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
    */
   fastify.get<{ Params: { runId: string } }>('/actor-runs/:runId/cost', async (request, reply) => {
     const { runId } = request.params;
+    const isAdmin = request.user?.role === 'admin';
+    const params: unknown[] = [runId];
+    const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, params, 'r');
 
     const result = await query<{
       id: string;
@@ -322,8 +325,8 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
                 d.item_count AS default_dataset_item_count
          FROM runs r
          LEFT JOIN datasets d ON d.id = r.default_dataset_id
-         WHERE r.id = $1 AND r.user_id = $2`,
-      [runId, request.user!.id]
+         WHERE r.id = $1 AND ${accessWhere}`,
+      params
     );
 
     const run = result.rows[0];
@@ -449,6 +452,10 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
         return { error: { type: 'invalid-request', message: 'At most 50 run ids per request' } };
       }
 
+      const isAdmin = request.user?.role === 'admin';
+      const params: unknown[] = [ids];
+      const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, params);
+
       const runsRes = await query<{
         id: string;
         started_at: Date;
@@ -459,10 +466,10 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
       }>(
         `SELECT id, started_at, finished_at, runner_id, runner_price_hourly, runner_provider
          FROM runs
-         WHERE id = ANY($1) AND user_id = $2
+         WHERE id = ANY($1) AND ${accessWhere}
            AND status IN ('SUCCEEDED', 'FAILED', 'TIMED-OUT', 'ABORTED')
            AND started_at IS NOT NULL AND finished_at IS NOT NULL`,
-        [ids, request.user!.id]
+        params
       );
 
       // One set-based sibling query for every droplet-attributed run in the
@@ -551,9 +558,10 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     values.push(runId);
+    const runIdParam = `$${values.length}`;
+    const isAdmin = request.user?.role === 'admin';
+    const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, values);
 
-    // Add user_id filter for authorization
-    values.push(request.user!.id);
     // CTE pattern: UPDATE returns the touched row, then we LEFT JOIN it
     // against datasets to populate default_dataset_item_count for the
     // formatRun output. Without this, the mutating endpoints would return
@@ -564,7 +572,7 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
       `
       WITH updated AS (
         UPDATE runs SET ${setClauses.join(', ')}
-        WHERE id = $${paramIndex} AND user_id = $${paramIndex + 1}
+        WHERE id = ${runIdParam} AND ${accessWhere}
         RETURNING *
       )
       SELECT r.*, d.item_count AS default_dataset_item_count
@@ -589,6 +597,9 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
     '/actor-runs/:runId/abort',
     async (request, reply) => {
       const { runId } = request.params;
+      const isAdmin = request.user?.role === 'admin';
+      const params: unknown[] = [runId];
+      const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, params);
 
       // CTE pattern (see PUT handler above for rationale) — keeps the
       // formatRun output shape consistent across endpoints.
@@ -597,14 +608,14 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
       WITH updated AS (
         UPDATE runs
         SET status = 'ABORTED', finished_at = NOW(), modified_at = NOW()
-        WHERE id = $1 AND status = 'RUNNING' AND user_id = $2
+        WHERE id = $1 AND status = 'RUNNING' AND ${accessWhere}
         RETURNING *
       )
       SELECT r.*, d.item_count AS default_dataset_item_count
       FROM updated r
       LEFT JOIN datasets d ON d.id = r.default_dataset_id
     `,
-        [runId, request.user!.id]
+        params
       );
 
       if (!result.rows[0]) {
@@ -636,6 +647,9 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
     '/actor-runs/:runId/resurrect',
     async (request, reply) => {
       const { runId } = request.params;
+      const isAdmin = request.user?.role === 'admin';
+      const params: unknown[] = [runId];
+      const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, params);
 
       // CTE pattern (see PUT handler above for rationale) — keeps the
       // formatRun output shape consistent across endpoints.
@@ -654,14 +668,14 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
         -- READY; the claim re-stamps it when a runner picks the run up.
         SET status = 'READY', started_at = NULL, finished_at = NULL,
             exit_code = NULL, status_message = NULL, modified_at = NOW()
-        WHERE id = $1 AND status IN ('FAILED', 'ABORTED', 'TIMED-OUT') AND user_id = $2
+        WHERE id = $1 AND status IN ('FAILED', 'ABORTED', 'TIMED-OUT') AND ${accessWhere}
         RETURNING *
       )
       SELECT r.*, d.item_count AS default_dataset_item_count
       FROM updated r
       LEFT JOIN datasets d ON d.id = r.default_dataset_id
     `,
-        [runId, request.user!.id]
+        params
       );
 
       if (!result.rows[0]) {
@@ -719,15 +733,18 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
     '/actor-runs/:runId/rerun',
     async (request, reply) => {
       const { runId } = request.params;
+      const isAdmin = request.user?.role === 'admin';
+      const params: unknown[] = [runId];
+      const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, params);
 
       // Same terminal-status guard set as resurrect: SUCCEEDED runs are
       // excluded on purpose — "run again after success" is a new-run
       // decision made from the actor page with editable input, not a
       // recovery action.
-      const origin = await query<RunRow>(
+      const origin = await query<RunRow & { org_id?: string | null }>(
         `SELECT * FROM runs
-          WHERE id = $1 AND status IN ('FAILED', 'ABORTED', 'TIMED-OUT') AND user_id = $2`,
-        [runId, request.user!.id]
+          WHERE id = $1 AND status IN ('FAILED', 'ABORTED', 'TIMED-OUT') AND ${accessWhere}`,
+        params
       );
 
       if (!origin.rows[0]) {
@@ -767,6 +784,7 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
       const kvStoreId = nanoid();
       const requestQueueId = nanoid();
       const newRunId = nanoid();
+      const orgId = originRun.org_id ?? null;
 
       // origin_run_id collapses chains to the FIRST run (same convention
       // as the runner's retry path): rerun-of-a-rerun still points at the
@@ -801,12 +819,14 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
         // status read and here. ABORTING counts as active — matches the
         // actor-delete route's definition — so rerunning right after an
         // abort waits for the abort to land.
+        const cloneParams: unknown[] = [chainRootId];
+        const cloneAccess = buildResourceAccessWhere(request.user!.id, isAdmin, cloneParams);
         const activeClone = await client.query(
           `SELECT 1 FROM runs
-            WHERE (origin_run_id = $1 OR id = $1) AND user_id = $2
+            WHERE (origin_run_id = $1 OR id = $1) AND ${cloneAccess}
               AND status IN ('READY', 'RUNNING', 'ABORTING')
             LIMIT 1`,
-          [chainRootId, request.user!.id]
+          cloneParams
         );
         if (activeClone.rows[0]) {
           await client.query('ROLLBACK');
@@ -822,17 +842,19 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
 
         // KEEP-IN-SYNC: storage trio + INPUT + build stamp mirror the
         // creation flow in actors.ts POST /acts/:actorId/runs.
-        await client.query('INSERT INTO datasets (id, user_id) VALUES ($1, $2)', [
+        await client.query('INSERT INTO datasets (id, user_id, org_id) VALUES ($1, $2, $3)', [
           datasetId,
           request.user!.id,
+          orgId,
         ]);
-        await client.query('INSERT INTO key_value_stores (id, user_id) VALUES ($1, $2)', [
-          kvStoreId,
-          request.user!.id,
-        ]);
-        await client.query('INSERT INTO request_queues (id, user_id) VALUES ($1, $2)', [
+        await client.query(
+          'INSERT INTO key_value_stores (id, user_id, org_id) VALUES ($1, $2, $3)',
+          [kvStoreId, request.user!.id, orgId]
+        );
+        await client.query('INSERT INTO request_queues (id, user_id, org_id) VALUES ($1, $2, $3)', [
           requestQueueId,
           request.user!.id,
+          orgId,
         ]);
 
         // Byte-for-byte copy — no parse/re-serialize round-trip that could
@@ -861,8 +883,8 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
         const result = await client.query<RunRow>(
           `
           WITH inserted AS (
-            INSERT INTO runs (id, actor_id, user_id, status, default_dataset_id, default_key_value_store_id, default_request_queue_id, timeout_secs, memory_mbytes, build_id, build_number, origin_run_id)
-            VALUES ($1, $2, $3, 'READY', $4, $5, $6, $7, $8, $9, $10, $11)
+            INSERT INTO runs (id, actor_id, user_id, org_id, status, default_dataset_id, default_key_value_store_id, default_request_queue_id, timeout_secs, memory_mbytes, build_id, build_number, origin_run_id)
+            VALUES ($1, $2, $3, $4, 'READY', $5, $6, $7, $8, $9, $10, $11, $12)
             RETURNING *
           )
           SELECT r.*, d.item_count AS default_dataset_item_count
@@ -873,6 +895,7 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
             newRunId,
             originRun.actor_id,
             request.user!.id,
+            orgId,
             datasetId,
             kvStoreId,
             requestQueueId,
@@ -887,22 +910,12 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
         // Copy the origin's per-run webhooks onto the new id — the whole
         // point of rerun-as-new-run. The runner's webhook match filters
         // `run_id = <current run>` and never consults origin_run_id, so
-        // without this copy the rerun would finish silently. (The runner's
-        // auto-retry path has exactly that latent bug; see roadmap.)
-        // user_id-scoped for defense in depth: today run-scoped webhooks
-        // always belong to the run's owner, but this SELECT must never
-        // become the query that copies another tenant's webhook (and its
-        // auth headers) if that invariant ever loosens.
-        //
-        // The column list is every user-authored column on the table, not
-        // just the ones reachable today: `description` is always NULL on a
-        // run-scoped row right now (run-start payloads have no description
-        // field, and PUT /v2/webhooks/:id refuses run-scoped rows to keep
-        // them immutable post-dispatch), but the day either of those
-        // loosens, a clone that silently drops it is a bug nobody would
-        // think to look for here. Copying NULL costs nothing.
+        // without this copy the rerun would finish silently.
+        const webhookParams: unknown[] = [runId];
+        const webhookAccess = buildResourceAccessWhere(request.user!.id, isAdmin, webhookParams);
         const originWebhooks = await client.query<{
           user_id: string | null;
+          org_id: string | null;
           event_types: string[];
           request_url: string;
           payload_template: string | null;
@@ -910,17 +923,18 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
           is_enabled: boolean;
           description: string | null;
         }>(
-          `SELECT user_id, event_types, request_url, payload_template, headers, is_enabled, description
-             FROM webhooks WHERE run_id = $1 AND user_id = $2`,
-          [runId, request.user!.id]
+          `SELECT user_id, org_id, event_types, request_url, payload_template, headers, is_enabled, description
+             FROM webhooks WHERE run_id = $1 AND ${webhookAccess}`,
+          webhookParams
         );
         for (const wh of originWebhooks.rows) {
           await client.query(
-            `INSERT INTO webhooks (id, user_id, event_types, request_url, payload_template, run_id, headers, is_enabled, description)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+            `INSERT INTO webhooks (id, user_id, org_id, event_types, request_url, payload_template, run_id, headers, is_enabled, description)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
             [
               nanoid(),
-              wh.user_id,
+              request.user!.id,
+              orgId,
               wh.event_types,
               wh.request_url,
               wh.payload_template,
@@ -997,13 +1011,17 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
     async (request, reply) => {
       const { runId } = request.params;
 
+      const isAdmin = request.user?.role === 'admin';
+      const params: unknown[] = [runId];
+      const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, params);
+
       const runResult = await query<{
         id: string;
         default_key_value_store_id: string;
         user_id: string;
       }>(
-        `SELECT id, default_key_value_store_id, user_id FROM runs WHERE id = $1 AND user_id = $2`,
-        [runId, request.user!.id]
+        `SELECT id, default_key_value_store_id, user_id FROM runs WHERE id = $1 AND ${accessWhere}`,
+        params
       );
       if (!runResult.rows[0]) {
         reply.status(404);
@@ -1080,9 +1098,13 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
     const offset = Math.max(0, parseInt(request.query.offset || '0', 10) || 0);
     const limit = Math.min(1000, Math.max(1, parseInt(request.query.limit || '100', 10) || 100));
 
+    const isAdmin = request.user?.role === 'admin';
+    const params: unknown[] = [runId];
+    const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, params, 'r');
+
     const run = await query<RunRow>(
-      `${RUN_SELECT_WITH_DATASET_COUNT} WHERE r.id = $1 AND r.user_id = $2`,
-      [runId, request.user!.id]
+      `${RUN_SELECT_WITH_DATASET_COUNT} WHERE r.id = $1 AND ${accessWhere}`,
+      params
     );
 
     if (!run.rows[0] || !run.rows[0].default_dataset_id) {
@@ -1112,10 +1134,13 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
     '/actor-runs/:runId/key-value-store/records/:key',
     async (request, reply) => {
       const { runId, key } = request.params;
+      const isAdmin = request.user?.role === 'admin';
+      const params: unknown[] = [runId];
+      const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, params, 'r');
 
       const run = await query<RunRow>(
-        `${RUN_SELECT_WITH_DATASET_COUNT} WHERE r.id = $1 AND r.user_id = $2`,
-        [runId, request.user!.id]
+        `${RUN_SELECT_WITH_DATASET_COUNT} WHERE r.id = $1 AND ${accessWhere}`,
+        params
       );
 
       if (!run.rows[0] || !run.rows[0].default_key_value_store_id) {

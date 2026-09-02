@@ -276,5 +276,28 @@ describe('Logs Routes', () => {
         error: { type: 'record-not-found' },
       });
     });
+
+    it('allows access for organization members via multi-tenant scoping', async () => {
+      // Mock that verifyRunAccess finds the run through org membership
+      mockQuery.mockResolvedValueOnce({ rows: [{ id: 'org-run-1' }] });
+      vi.mocked(redis.llen).mockResolvedValue(1);
+      vi.mocked(redis.lrange).mockResolvedValue([
+        JSON.stringify({
+          timestamp: '2026-05-02T10:00:00Z',
+          level: 'INFO',
+          message: 'Org run log',
+        }),
+      ]);
+
+      const response = await app.inject({ method: 'GET', url: '/actor-runs/org-run-1/logs' });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body);
+      expect(body.data.items[0].message).toBe('Org run log');
+
+      // Verify the query checked organization membership
+      const queryCall = mockQuery.mock.calls[0] as [string, unknown[]];
+      expect(queryCall[0]).toContain('organization_members');
+    });
   });
 });
