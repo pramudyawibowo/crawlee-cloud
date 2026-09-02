@@ -1011,18 +1011,11 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
     async (request, reply) => {
       const { runId } = request.params;
 
-      const isAdmin = request.user?.role === 'admin';
-      const params: unknown[] = [runId];
-      const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, params);
-
       const runResult = await query<{
         id: string;
         default_key_value_store_id: string;
         user_id: string;
-      }>(
-        `SELECT id, default_key_value_store_id, user_id FROM runs WHERE id = $1 AND ${accessWhere}`,
-        params
-      );
+      }>(`SELECT id, default_key_value_store_id, user_id FROM runs WHERE id = $1`, [runId]);
       if (!runResult.rows[0]) {
         reply.status(404);
         return { error: { type: 'record-not-found', message: 'Run not found' } };
