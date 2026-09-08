@@ -302,17 +302,6 @@ export function RunRamUsage({
                 strokeOpacity="0.25"
                 strokeDasharray="3 3"
               />
-              <text
-                x={chartWidth - paddingX - 4}
-                y={limitLineY - 3}
-                fill="currentColor"
-                opacity="0.5"
-                fontSize="8"
-                textAnchor="end"
-                fontFamily="monospace"
-              >
-                LIMIT: {limitMb} MB
-              </text>
 
               {/* Area fill */}
               <path d={areaD} fill={`url(#${gradientId})`} />
@@ -350,6 +339,17 @@ export function RunRamUsage({
                 </>
               )}
             </svg>
+
+            {/* Memory Limit Ceiling Label */}
+            <div
+              className="absolute pointer-events-none text-[9px] font-mono text-muted-foreground/60 select-none -translate-y-full pb-0.5 leading-none"
+              style={{
+                top: `${(limitLineY / chartHeight) * 100}%`,
+                right: `calc(${(paddingX / chartWidth) * 100}% + 4px)`,
+              }}
+            >
+              LIMIT: {limitMb} MB
+            </div>
 
             {/* Hover tooltip */}
             {hoveredPoint && hoverX !== null && (
