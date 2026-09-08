@@ -10,6 +10,7 @@
  * never IPs or tokens (that's /v2/scaler/status, admin-only).
  */
 
+import os from 'node:os';
 import type { FastifyPluginAsync } from 'fastify';
 import { authenticate } from '../auth/middleware.js';
 import { runStorageHealthChecks, type StorageHealth } from '../health.js';
@@ -17,6 +18,7 @@ import { getProviderExecutionDefaults, loadScalerConfig } from '../scaler/index.
 import { getApiVersion } from '../version.js';
 import { config } from '../config.js';
 import { query } from '../db/index.js';
+import { redis } from '../storage/redis.js';
 
 export interface SystemInfo {
   version: string;
@@ -86,6 +88,67 @@ export const systemRoutes: FastifyPluginAsync = async (fastify) => {
       },
     };
     return { data: body };
+  });
+
+  // GET /v2/system/resources — host and runners memory / resource metrics for dashboard sidebar.
+  fastify.get('/system/resources', async () => {
+    const totalMemBytes = os.totalmem();
+    const freeMemBytes = os.freemem();
+    const totalMb = Math.round(totalMemBytes / (1024 * 1024));
+    const freeMb = Math.round(freeMemBytes / (1024 * 1024));
+    const usedMb = Math.max(0, totalMb - freeMb);
+    const usagePercent =
+      totalMb > 0 ? Math.min(100, Math.round((usedMb / totalMb) * 1000) / 10) : 0;
+
+    let runnerMetrics: {
+      usedMb: number;
+      totalMb: number;
+      percent: number;
+      activeRuns: number;
+    } | null = null;
+
+    try {
+      const keys = await redis.keys('runner:heartbeat:*');
+      if (keys.length > 0) {
+        const heartbeats = await Promise.all(keys.map((k) => redis.get(k)));
+        let sumUsed = 0;
+        let sumTotal = 0;
+        let sumRuns = 0;
+        for (const hbStr of heartbeats) {
+          if (!hbStr) continue;
+          try {
+            const hb = JSON.parse(hbStr);
+            if (typeof hb.memoryUsedMb === 'number') sumUsed += hb.memoryUsedMb;
+            if (typeof hb.memoryTotalMb === 'number') sumTotal += hb.memoryTotalMb;
+            if (typeof hb.activeRuns === 'number') sumRuns += hb.activeRuns;
+          } catch {
+            // ignore malformed heartbeat
+          }
+        }
+        if (sumTotal > 0) {
+          runnerMetrics = {
+            usedMb: sumUsed,
+            totalMb: sumTotal,
+            percent: Math.min(100, Math.round((sumUsed / sumTotal) * 1000) / 10),
+            activeRuns: sumRuns,
+          };
+        }
+      }
+    } catch {
+      // ignore redis error
+    }
+
+    return {
+      data: {
+        host: {
+          totalMb,
+          usedMb,
+          freeMb,
+          usagePercent,
+        },
+        runners: runnerMetrics,
+      },
+    };
   });
 
   // GET /v2/system/retention/status — admin-only summary of reaper state.

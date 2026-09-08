@@ -79,6 +79,7 @@ export interface Run {
     timeoutSecs?: number;
     memoryMbytes?: number;
   };
+  peakMemoryMb?: number | null;
   /** Automatic-retry attempt number; 0 for original runs and manual reruns. */
   retryCount: number;
   /**
@@ -599,6 +600,26 @@ export async function getSystemInfo(): Promise<SystemInfo> {
   return res.data;
 }
 
+export interface SystemResources {
+  host: {
+    totalMb: number;
+    usedMb: number;
+    freeMb: number;
+    usagePercent: number;
+  };
+  runners: {
+    usedMb: number;
+    totalMb: number;
+    percent: number;
+    activeRuns: number;
+  } | null;
+}
+
+export async function getSystemResources(): Promise<SystemResources> {
+  const res = await fetchApi<{ data: SystemResources }>('/v2/system/resources');
+  return res.data;
+}
+
 // Runs
 export interface ListRunsParams {
   status?: Run['status'];
@@ -697,6 +718,29 @@ export interface RunCost {
 
 export async function getRunCost(id: string): Promise<RunCost> {
   const res = await fetchApi<{ data: RunCost }>(`/v2/actor-runs/${id}/cost`);
+  return res.data;
+}
+
+export interface RunMetricPoint {
+  runId?: string;
+  timestamp: string;
+  usedMb: number;
+  limitMb: number;
+  percent: number;
+  peakMemoryMb?: number;
+}
+
+export interface RunMetricsData {
+  runId: string;
+  status: string;
+  memoryLimitMb: number;
+  peakMemoryMb: number | null;
+  current: RunMetricPoint | null;
+  history: RunMetricPoint[];
+}
+
+export async function getRunMetrics(id: string): Promise<RunMetricsData> {
+  const res = await fetchApi<{ data: RunMetricsData }>(`/v2/actor-runs/${id}/metrics`);
   return res.data;
 }
 

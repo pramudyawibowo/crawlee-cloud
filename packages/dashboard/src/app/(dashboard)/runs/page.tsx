@@ -563,6 +563,7 @@ export default function RunsPage() {
                 <th className="px-5 py-2 font-normal">Actor</th>
                 <th className="px-5 py-2 font-normal">Status</th>
                 <th className="px-5 py-2 font-normal">Duration</th>
+                <th className="px-5 py-2 font-normal text-right">RAM</th>
                 <th className="px-5 py-2 font-normal text-right">Items</th>
                 <th className="px-5 py-2 font-normal text-right">Cost</th>
                 <th className="px-5 py-2 font-normal text-right">Started</th>
@@ -609,6 +610,22 @@ export default function RunsPage() {
                     </td>
                     <td className="px-5 py-3 font-mono text-[11px] text-muted-foreground tnum">
                       {fmtDuration(run.startedAt, run.finishedAt)}
+                    </td>
+                    <td className="px-5 py-3 font-mono text-[11px] tnum text-right">
+                      {run.peakMemoryMb ? (
+                        <span className="text-foreground">
+                          {run.peakMemoryMb}
+                          <span className="text-muted-foreground/60 text-[10px]">
+                            /{run.options?.memoryMbytes ?? 1024} MB
+                          </span>
+                        </span>
+                      ) : run.options?.memoryMbytes ? (
+                        <span className="text-muted-foreground/60">
+                          {run.options.memoryMbytes} MB
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground/40">—</span>
+                      )}
                     </td>
                     <td className="px-5 py-3 font-mono text-[11px] tnum text-right">
                       {/* Item count is the cell content; click navigates

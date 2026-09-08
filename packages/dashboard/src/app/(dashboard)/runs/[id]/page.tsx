@@ -7,7 +7,6 @@ import {
   Ban,
   Boxes,
   Clock,
-  Cpu,
   Database,
   FileInput,
   ListOrdered,
@@ -18,6 +17,7 @@ import {
 } from 'lucide-react';
 import { AppLink } from '@/components/app-link';
 import { CostAnalysisCard } from '@/components/cost-analysis-card';
+import { RunRamUsage } from '@/components/run-ram-usage';
 import { StatusChip } from '@/components/ui/badge';
 import { CopyButton } from '@/components/ui/copy-button';
 import {
@@ -399,6 +399,14 @@ function RunDetail() {
       {/* key: remount per run so stale cost from a previous run never renders */}
       <CostAnalysisCard key={id} runId={id} status={run.status} />
 
+      {/* Realtime RAM & Memory Usage Card */}
+      <RunRamUsage
+        key={`ram-${id}`}
+        runId={id}
+        status={run.status}
+        memoryLimitMbytes={run.options?.memoryMbytes}
+      />
+
       {/* Two-column: meta + console */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
         <aside className="panel p-5 md:col-span-1 space-y-4 h-fit">
@@ -409,9 +417,15 @@ function RunDetail() {
           <DefRow icon={Clock} label="Finished">
             {run.finishedAt ? new Date(run.finishedAt).toLocaleString() : '—'}
           </DefRow>
-          <DefRow icon={Cpu} label="Memory">
-            {run.options?.memoryMbytes ? `${run.options.memoryMbytes} MB` : '—'}
-          </DefRow>
+          <div className="pt-2 pb-1 border-t border-border/60">
+            <RunRamUsage
+              key={`sidebar-ram-${id}`}
+              runId={id}
+              status={run.status}
+              memoryLimitMbytes={run.options?.memoryMbytes}
+              compact
+            />
+          </div>
           <DefRow icon={Clock} label="Timeout">
             {run.options?.timeoutSecs ? `${run.options.timeoutSecs}s` : '—'}
           </DefRow>

@@ -1,5 +1,6 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import Image from 'next/image';
 import { AppLink } from '@/components/app-link';
 import { prefixPath, ROUTE_PREFIX } from '@/lib/path-prefix';
@@ -26,6 +27,7 @@ import { cn } from '@/lib/utils';
 import type { LucideIcon } from 'lucide-react';
 import { WorkspaceSwitcher } from '@/components/workspace-switcher';
 import { useAuth } from '@/lib/auth';
+import { getSystemResources, type SystemResources } from '@/lib/api';
 
 type Item = { href: string; label: string; icon: LucideIcon; soon?: boolean };
 type Group = { id: string; label: string; items: Item[] };
@@ -221,6 +223,71 @@ export function NavContents({ onNavigate }: { onNavigate?: () => void }) {
 }
 
 /*
+  Sidebar RAM Usage — monitors real-time host/runner memory usage above operator identity.
+*/
+function SidebarRamUsage() {
+  const [resources, setResources] = useState<SystemResources | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    async function load() {
+      try {
+        const data = await getSystemResources();
+        if (alive) setResources(data);
+      } catch {
+        // Quiet fallback
+      }
+    }
+    void load();
+    const interval = setInterval(() => void load(), 5000);
+    return () => {
+      alive = false;
+      clearInterval(interval);
+    };
+  }, []);
+
+  if (!resources) return null;
+
+  const mem = resources.runners || resources.host;
+  const usedMb = mem.usedMb;
+  const totalMb = mem.totalMb;
+  const percent =
+    'usagePercent' in mem
+      ? mem.usagePercent
+      : (mem.percent ?? (totalMb > 0 ? Math.round((usedMb / totalMb) * 1000) / 10 : 0));
+
+  const isHigh = percent >= 85;
+  const isWarn = percent >= 70 && percent < 85;
+
+  const toneColor = isHigh ? 'text-fail' : isWarn ? 'text-warn' : 'text-signal';
+  const toneBg = isHigh ? 'bg-fail' : isWarn ? 'bg-warn' : 'bg-signal';
+
+  return (
+    <div className="px-2.5 py-2 bg-secondary/40 border border-border rounded-sm font-mono mb-2">
+      <div className="flex items-center justify-between text-[11px] mb-1.5">
+        <span className="flex items-center gap-1.5 text-muted-foreground font-medium text-[10px] tracking-wider uppercase">
+          <Cpu className="h-3 w-3 text-signal" />
+          <span>RAM USAGE</span>
+        </span>
+        <span className={cn('font-bold tnum text-[11px]', toneColor)}>{percent}%</span>
+      </div>
+
+      <div className="w-full bg-secondary h-1.5 rounded-full overflow-hidden relative">
+        <div
+          className={cn('h-full rounded-full transition-all duration-500 ease-out', toneBg)}
+          style={{ width: `${Math.max(2, Math.min(100, percent))}%` }}
+        />
+      </div>
+
+      <div className="flex items-center justify-between text-[9px] text-muted-foreground tnum mt-1">
+        <span>{usedMb >= 1024 ? `${(usedMb / 1024).toFixed(1)} GB` : `${usedMb} MB`}</span>
+        <span>{totalMb >= 1024 ? `${(totalMb / 1024).toFixed(1)} GB` : `${totalMb} MB`}</span>
+      </div>
+    </div>
+  );
+}
+
+/*
   Operator footer — identity card with sign-out.
 */
 export function OperatorFooter() {
@@ -231,6 +298,7 @@ export function OperatorFooter() {
 
   return (
     <div className="border-t border-border px-3 py-3 shrink-0">
+      <SidebarRamUsage />
       <div className="flex items-center gap-2.5 px-2 py-2 bg-secondary/40 border border-border rounded-sm">
         <div className="h-7 w-7 rounded-sm bg-signal/10 border border-signal/40 grid place-items-center">
           <span className="font-mono text-[10px] text-signal font-bold">{initial}</span>

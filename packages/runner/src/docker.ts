@@ -121,10 +121,51 @@ export interface LogRedisPipeline {
   ltrim(key: string, start: number, stop: number): unknown;
   expire(key: string, seconds: number): unknown;
   publish(channel: string, message: string): unknown;
+  set(key: string, value: string): unknown;
   exec(): Promise<Array<[error: Error | null, result: unknown]> | null>;
 }
 export interface LogRedis {
   pipeline(): LogRedisPipeline;
+}
+
+export interface RunMetricSnapshot {
+  runId: string;
+  timestamp: string;
+  usedMb: number;
+  limitMb: number;
+  percent: number;
+  peakMemoryMb: number;
+}
+
+/**
+ * Best-effort pipelined writer for realtime run metrics (RAM usage, peak).
+ * Stores latest snapshot in metrics:<runId>, pushes to metrics:history:<runId> (capped at 120 points),
+ * and publishes to metrics:<runId> for live subscribers.
+ * Exported for unit tests.
+ */
+export async function writeRunMetrics(
+  client: LogRedis,
+  runId: string,
+  metric: RunMetricSnapshot
+): Promise<void> {
+  const metricJson = JSON.stringify(metric);
+  const key = `metrics:${runId}`;
+  const historyKey = `metrics:history:${runId}`;
+  try {
+    const pipe = client.pipeline();
+    pipe.set(key, metricJson);
+    pipe.expire(key, 86400);
+    pipe.rpush(historyKey, metricJson);
+    pipe.ltrim(historyKey, -120, -1);
+    pipe.expire(historyKey, 86400);
+    pipe.publish(key, metricJson);
+    const results = await pipe.exec();
+    if (results === null) return;
+    const firstErr = results.find(([err]) => err !== null)?.[0];
+    if (firstErr) throw firstErr;
+  } catch (err) {
+    console.warn(`[${runId}] Failed to record run metrics: ${(err as Error).message}`);
+  }
 }
 
 /**
@@ -321,8 +362,8 @@ export function boundedFlush(
   return Promise.race([ended.then(drain), timeout]);
 }
 
-/** How often executeRun samples container memory for peak tracking. */
-const STATS_SAMPLE_INTERVAL_MS = 15_000;
+/** How often executeRun samples container memory for real-time tracking (1 second). */
+export const STATS_SAMPLE_INTERVAL_MS = 1000;
 
 /**
  * Working-set memory in MB from a Docker stats snapshot, or null when the
@@ -497,7 +538,20 @@ export async function executeRun(options: RunOptions): Promise<RunResult> {
       try {
         const stats: unknown = await container.stats({ stream: false });
         const usedMb = memoryUsageMbFromStats(stats);
-        if (usedMb !== null && usedMb > (peakMemoryMb ?? -1)) peakMemoryMb = usedMb;
+        if (usedMb !== null) {
+          if (usedMb > (peakMemoryMb ?? -1)) peakMemoryMb = usedMb;
+          const limitMb = memoryMb ?? 1024;
+          const percent =
+            limitMb > 0 ? Math.min(100, Math.round((usedMb / limitMb) * 1000) / 10) : 0;
+          await writeRunMetrics(redis, runId, {
+            runId,
+            timestamp: new Date().toISOString(),
+            usedMb,
+            limitMb,
+            percent,
+            peakMemoryMb: peakMemoryMb ?? usedMb,
+          });
+        }
       } catch {
         // Container exited between ticks, or a stats-API hiccup — fine.
       }

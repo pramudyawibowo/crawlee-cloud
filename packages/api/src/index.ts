@@ -2,6 +2,7 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import { ZodError } from 'zod';
 import compress from '@fastify/compress';
+import websocket from '@fastify/websocket';
 import { config } from './config.js';
 import { enforceSecurityConfig } from './config-validator.js';
 import { initDatabase } from './db/index.js';
@@ -61,6 +62,9 @@ await app.register(cors, {
 
 // Enable compression/decompression (handles gzip request bodies from SDK)
 await app.register(compress, { global: true });
+
+// Enable WebSocket support for live metrics and log streaming
+await app.register(websocket);
 
 // Add content type parsers for Apify SDK compatibility
 // The SDK sends form-urlencoded for some endpoints

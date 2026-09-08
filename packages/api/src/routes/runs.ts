@@ -34,6 +34,7 @@ interface RunRow {
   build_number: string | null;
   exit_code: number | null;
   stats_json: Record<string, unknown> | null;
+  peak_memory_mb: number | null;
   retry_count: number;
   origin_run_id: string | null;
   run_after: Date | null;
@@ -291,6 +292,150 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
 
     return { data: formatRun(result.rows[0]) };
   });
+
+  /**
+   * GET /v2/actor-runs/:runId/metrics - Realtime RAM & peak usage for an actor run.
+   *
+   * Returns live snapshot and recent history from Redis when available,
+   * falling back to persisted runs.peak_memory_mb and runs.memory_mbytes in Postgres.
+   */
+  fastify.get<{ Params: { runId: string } }>(
+    '/actor-runs/:runId/metrics',
+    async (request, reply) => {
+      const { runId } = request.params;
+      const isAdmin = request.user?.role === 'admin';
+      const params: unknown[] = [runId];
+      const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, params, 'r');
+
+      const result = await query<RunRow>(
+        `${RUN_SELECT_WITH_DATASET_COUNT} WHERE r.id = $1 AND ${accessWhere}`,
+        params
+      );
+
+      const run = result.rows[0];
+      if (!run) {
+        reply.status(404);
+        return { error: { type: 'record-not-found', message: 'Run not found' } };
+      }
+
+      const memoryLimitMb = run.memory_mbytes ?? 1024;
+      let peakMemoryMb = run.peak_memory_mb ?? null;
+      let current: {
+        runId: string;
+        timestamp: string;
+        usedMb: number;
+        limitMb: number;
+        percent: number;
+        peakMemoryMb: number;
+      } | null = null;
+      let history: Array<{
+        runId: string;
+        timestamp: string;
+        usedMb: number;
+        limitMb: number;
+        percent: number;
+        peakMemoryMb: number;
+      }> = [];
+
+      try {
+        const [rawCurrent, rawHistory] = await Promise.all([
+          redis.get(`metrics:${runId}`),
+          redis.lrange(`metrics:history:${runId}`, -120, -1),
+        ]);
+
+        if (rawCurrent) {
+          current = JSON.parse(rawCurrent);
+          if (current?.peakMemoryMb !== undefined) {
+            peakMemoryMb = Math.max(peakMemoryMb ?? 0, current.peakMemoryMb);
+          }
+        }
+
+        if (rawHistory && rawHistory.length > 0) {
+          history = rawHistory
+            .map((item) => {
+              try {
+                return JSON.parse(item);
+              } catch {
+                return null;
+              }
+            })
+            .filter(Boolean);
+        }
+      } catch (err) {
+        request.log.warn({ err }, 'Failed to read metrics from Redis');
+      }
+
+      return {
+        data: {
+          runId: run.id,
+          status: run.status,
+          memoryLimitMb,
+          peakMemoryMb,
+          current,
+          history,
+        },
+      };
+    }
+  );
+
+  /**
+   * GET /v2/actor-runs/:runId/metrics/stream - WebSocket streaming for real-time RAM usage.
+   */
+  fastify.get<{ Params: { runId: string } }>(
+    '/actor-runs/:runId/metrics/stream',
+    { websocket: true },
+    async (socket, request) => {
+      const { runId } = request.params;
+      const isAdmin = request.user?.role === 'admin';
+      const params: unknown[] = [runId];
+      const accessWhere = buildResourceAccessWhere(request.user!.id, isAdmin, params, 'r');
+
+      const result = await query<RunRow>(
+        `${RUN_SELECT_WITH_DATASET_COUNT} WHERE r.id = $1 AND ${accessWhere}`,
+        params
+      );
+
+      if (!result.rows[0]) {
+        socket.send(JSON.stringify({ error: 'Run not found or access denied' }));
+        socket.close();
+        return;
+      }
+
+      try {
+        const rawCurrent = await redis.get(`metrics:${runId}`);
+        if (rawCurrent) {
+          socket.send(rawCurrent);
+        }
+      } catch {
+        // Ignore initial cache read error
+      }
+
+      const sub = redis.duplicate();
+      await sub.subscribe(`metrics:${runId}`);
+
+      const onMessage = (channel: string, message: string) => {
+        if (channel === `metrics:${runId}`) {
+          try {
+            socket.send(message);
+          } catch {
+            // Socket closed or connection broken
+          }
+        }
+      };
+
+      sub.on('message', onMessage);
+
+      socket.on('close', () => {
+        sub.unsubscribe(`metrics:${runId}`).catch(() => {});
+        sub.quit().catch(() => {});
+      });
+
+      socket.on('error', () => {
+        sub.unsubscribe(`metrics:${runId}`).catch(() => {});
+        sub.quit().catch(() => {});
+      });
+    }
+  );
 
   /**
    * GET /v2/actor-runs/:runId/cost - Run cost analysis (user-scoped).
@@ -1212,7 +1357,9 @@ function formatRun(row: RunRow) {
         computeUnits: 0,
       }),
       datasetItemCount: row.default_dataset_item_count ?? 0,
+      peakMemoryMb: row.peak_memory_mb ?? null,
     },
+    peakMemoryMb: row.peak_memory_mb ?? null,
     retryCount: row.retry_count,
     originRunId: row.origin_run_id,
     createdAt: row.created_at,
