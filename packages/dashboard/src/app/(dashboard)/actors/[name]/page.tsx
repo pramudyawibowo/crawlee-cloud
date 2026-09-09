@@ -417,6 +417,13 @@ function OverviewPanel({ actor, onStarted }: { actor: Actor; onStarted: (run: Ru
         </DefRow>
         <DefRow label="Created">{new Date(actor.createdAt).toLocaleString()}</DefRow>
         <DefRow label="Modified">{new Date(actor.modifiedAt).toLocaleString()}</DefRow>
+        {actor.priority && (
+          <DefRow label="Queue">
+            <Badge variant="warning" shape="chip">
+              PRIORITY
+            </Badge>
+          </DefRow>
+        )}
         {actor.description && (
           <div>
             <p className="eyebrow mb-2">ABOUT</p>
@@ -447,6 +454,7 @@ function ConfigPanel({ actor, onSaved }: { actor: Actor; onSaved: (a: Actor) => 
   );
   const [maxRetries, setMaxRetries] = useState<number | ''>(actor.maxRetries ?? '');
   const [retryDelaySecs, setRetryDelaySecs] = useState<number | ''>(actor.retryDelaySecs ?? '');
+  const [priority, setPriority] = useState<boolean>(actor.priority ?? false);
   const [envVars, setEnvVars] = useState<{ key: string; value: string }[]>(
     Object.entries(actor.defaultRunOptions?.envVars ?? {}).map(([key, value]) => ({ key, value }))
   );
@@ -515,6 +523,7 @@ function ConfigPanel({ actor, onSaved }: { actor: Actor; onSaved: (a: Actor) => 
         },
         maxRetries: maxRetries === '' ? undefined : Number(maxRetries),
         retryDelaySecs: retryDelaySecs === '' ? undefined : Number(retryDelaySecs),
+        priority,
       });
       onSaved(updated);
       setSavedAt(Date.now());
@@ -623,6 +632,24 @@ function ConfigPanel({ actor, onSaved }: { actor: Actor; onSaved: (a: Actor) => 
                 className="w-full h-9 px-3 rounded-sm border border-border bg-background font-mono text-[12px] text-foreground focus:outline-none focus:border-signal/50"
               />
             </Field>
+          </div>
+
+          <div className="flex items-center justify-between pt-2 border-t border-border">
+            <div>
+              <Label>Priority queue</Label>
+              <p className="text-[11px] text-muted-foreground mt-1">
+                Every run of this actor always skips ahead of the non-priority queue.
+              </p>
+            </div>
+            <label className="relative inline-flex items-center cursor-pointer shrink-0">
+              <input
+                type="checkbox"
+                checked={priority}
+                onChange={(e) => setPriority(e.target.checked)}
+                className="sr-only peer"
+              />
+              <div className="w-10 h-5 bg-border peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-background peer-checked:after:bg-background after:border-border after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-signal" />
+            </label>
           </div>
 
           {/* Env vars editor */}

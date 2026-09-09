@@ -94,6 +94,7 @@ const RUN: RunJob = {
   retry_count: 0,
   origin_run_id: null,
   run_after: null,
+  priority: false,
 };
 
 beforeEach(() => {
@@ -161,9 +162,22 @@ describe('maybeRetryRun', () => {
     expect(params[8]).toBe(1); // retry_count bumped
     expect(params[9]).toBe('run-1'); // origin_run_id defaults to the failed run
     expect(params[10]).toBe(60); // actor's retry delay
+    expect(params[11]).toBe(false); // priority carried over from the origin run
     expect(redis.publish).toHaveBeenCalledWith('run:new', newRunId);
     // The clone is created inside a committed transaction.
     expect(db.txStatements).toEqual(['BEGIN', 'COMMIT']);
+  });
+
+  it('carries the origin run priority over to the retry clone', async () => {
+    // feat/actor-priority: a retried priority run must stay ahead of the
+    // non-priority queue rather than silently dropping to normal FIFO.
+    const db = mockPool({ rows: [{ max_retries: 3, retry_delay_secs: 60 }] }, { rows: [] });
+    const redis = fakeRedis();
+
+    await maybeRetryRun({ ...RUN, priority: true }, 'run-1', db, redis);
+
+    const [, params] = mustFindCall(db, 'INSERT INTO runs');
+    expect(params[11]).toBe(true);
   });
 
   it('preserves the original origin_run_id across chained retries', async () => {
