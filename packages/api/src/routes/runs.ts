@@ -38,6 +38,7 @@ interface RunRow {
   retry_count: number;
   origin_run_id: string | null;
   run_after: Date | null;
+  priority: boolean;
   created_at: Date;
   modified_at: Date;
   /**
@@ -1028,8 +1029,8 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
         const result = await client.query<RunRow>(
           `
           WITH inserted AS (
-            INSERT INTO runs (id, actor_id, user_id, org_id, status, default_dataset_id, default_key_value_store_id, default_request_queue_id, timeout_secs, memory_mbytes, build_id, build_number, origin_run_id)
-            VALUES ($1, $2, $3, $4, 'READY', $5, $6, $7, $8, $9, $10, $11, $12)
+            INSERT INTO runs (id, actor_id, user_id, org_id, status, default_dataset_id, default_key_value_store_id, default_request_queue_id, timeout_secs, memory_mbytes, build_id, build_number, origin_run_id, priority)
+            VALUES ($1, $2, $3, $4, 'READY', $5, $6, $7, $8, $9, $10, $11, $12, $13)
             RETURNING *
           )
           SELECT r.*, d.item_count AS default_dataset_item_count
@@ -1049,6 +1050,7 @@ export const runsRoutes: FastifyPluginAsync = async (fastify) => {
             buildId,
             buildNumber,
             chainRootId,
+            originRun.priority,
           ]
         );
 
@@ -1362,6 +1364,7 @@ function formatRun(row: RunRow) {
     peakMemoryMb: row.peak_memory_mb ?? null,
     retryCount: row.retry_count,
     originRunId: row.origin_run_id,
+    priority: row.priority,
     createdAt: row.created_at,
     modifiedAt: row.modified_at,
   };

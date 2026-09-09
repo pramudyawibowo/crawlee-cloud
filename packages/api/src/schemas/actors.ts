@@ -35,6 +35,10 @@ export const CreateActorSchema = z.object({
     .optional(),
   maxRetries: z.number().int().min(0).max(10).optional(),
   retryDelaySecs: z.number().int().min(1).max(3600).optional(),
+  // When true, every run created for this actor is always stamped
+  // priority=true (see POST /v2/acts/:actorId/runs) — no per-run flag
+  // needed. Unset on update leaves the actor's existing setting alone.
+  priority: z.boolean().optional(),
   proxyPassword: z.string().min(1).max(256).nullable().optional(),
   // Source version string from .actor/actor.json (e.g. "0.0", "1.2").
   // When provided, the API upserts an actor_versions row and links the
@@ -62,6 +66,7 @@ export const ActorRunSchema = z.object({
   memory: z.number().int().positive().max(16_384).optional(), // Max 16GB
   envVars: z.record(z.string()).optional(),
   webhooks: z.array(RunWebhookSchema).max(20).optional(),
+  priority: z.boolean().optional().default(false),
 });
 
 export const DeleteActorQuerySchema = z.object({

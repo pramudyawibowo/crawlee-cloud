@@ -119,6 +119,19 @@ describe('claimNextRun', () => {
     const pool = mockPool([]);
     expect(await claimNextRun(pool as never, null)).toBeNull();
   });
+
+  it('orders priority runs ahead of FIFO, without preempting eligibility', async () => {
+    // Priority runs skip ahead of queued non-priority runs (feat/actor-priority):
+    // ORDER BY priority DESC keeps the FIFO tiebreak on created_at intact
+    // within each group, and doesn't touch the WHERE clause — a priority
+    // run is still gated by the same memory/disk eligibility as any other.
+    const pool = mockPool([{ id: 'run-1', status: 'RUNNING' }]);
+
+    await claimNextRun(pool as never, null);
+
+    const sql = pool.query.mock.calls[0][0] as string;
+    expect(sql).toMatch(/ORDER BY priority DESC, created_at ASC/);
+  });
 });
 
 describe('processNextRun', () => {

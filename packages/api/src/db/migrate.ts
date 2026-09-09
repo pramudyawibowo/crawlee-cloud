@@ -305,10 +305,25 @@ END $$;
 ALTER TABLE actors ADD COLUMN IF NOT EXISTS max_retries INTEGER DEFAULT 0;
 ALTER TABLE actors ADD COLUMN IF NOT EXISTS retry_delay_secs INTEGER DEFAULT 60;
 
+-- When set, every run created for this actor is stamped priority=true
+-- (POST /v2/acts/:actorId/runs ORs the actor's flag into the new run's
+-- priority column — see packages/api/src/routes/actors.ts) so it always
+-- skips ahead of the non-priority queue, with no per-run opt-in needed.
+ALTER TABLE actors ADD COLUMN IF NOT EXISTS priority BOOLEAN NOT NULL DEFAULT FALSE;
+
 -- Add retry/scheduling columns to runs table
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS retry_count INTEGER DEFAULT 0;
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS origin_run_id VARCHAR(21);
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS run_after TIMESTAMPTZ;
+
+-- Priority runs skip ahead of queued (READY) runs when the runner claims
+-- its next job: claimNextRun (packages/runner/src/queue.ts) orders by
+-- (priority DESC, created_at ASC), so priority runs are FIFO among
+-- themselves and always claimed before any non-priority run, without
+-- preempting a run already RUNNING or bypassing the memory/disk gates.
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS priority BOOLEAN NOT NULL DEFAULT FALSE;
+CREATE INDEX IF NOT EXISTS idx_runs_ready_priority
+  ON runs(priority DESC, created_at ASC) WHERE status = 'READY';
 
 -- Run cost attribution (see docs/superpowers/specs/2026-07-15-run-cost-analysis-design.md).
 -- Stamped by the runner at claim time (packages/runner/src/queue.ts):
