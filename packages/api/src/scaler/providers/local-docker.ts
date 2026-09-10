@@ -102,7 +102,13 @@ export class LocalDockerProvider implements RunnerProvider {
       // process.env.SCALER_RUNS_PER_RUNNER read this used to do had a
       // different fallback (2) and could disagree with the loader.
       MAX_CONCURRENT_RUNS: String(config.runsPerRunner),
-      LOG_LEVEL: 'info',
+      LOG_LEVEL: process.env.LOG_LEVEL || 'info',
+      ...(process.env.PROXY_ENCRYPTION_KEY
+        ? { PROXY_ENCRYPTION_KEY: process.env.PROXY_ENCRYPTION_KEY }
+        : {}),
+      ...(process.env.DB_SSL ? { DB_SSL: process.env.DB_SSL } : {}),
+      ...(process.env.DB_POOL_MAX ? { DB_POOL_MAX: process.env.DB_POOL_MAX } : {}),
+      ...(process.env.NODE_ENV ? { NODE_ENV: process.env.NODE_ENV } : {}),
     };
 
     const envArray = Object.entries(env).map(([k, v]) => `${k}=${v}`);

@@ -189,6 +189,26 @@ describe('LocalDockerProvider', () => {
       expect(env.DOCKER_NETWORK).toBe('my-custom-net');
     });
 
+    it('propagates PROXY_ENCRYPTION_KEY, DB_SSL, and DB_POOL_MAX to runner env', async () => {
+      process.env.PROXY_ENCRYPTION_KEY = 'a'.repeat(64);
+      process.env.DB_SSL = 'false';
+      process.env.DB_POOL_MAX = '20';
+
+      const provider = new LocalDockerProvider();
+      await provider.createRunner(makeRunnerConfig());
+
+      const opts = createContainer.mock.calls[0][0] as Docker.ContainerCreateOptions;
+      const env = envToMap(opts.Env ?? []);
+
+      expect(env.PROXY_ENCRYPTION_KEY).toBe('a'.repeat(64));
+      expect(env.DB_SSL).toBe('false');
+      expect(env.DB_POOL_MAX).toBe('20');
+
+      delete process.env.PROXY_ENCRYPTION_KEY;
+      delete process.env.DB_SSL;
+      delete process.env.DB_POOL_MAX;
+    });
+
     it('starts the container after creating it', async () => {
       const provider = new LocalDockerProvider();
       await provider.createRunner(makeRunnerConfig());
