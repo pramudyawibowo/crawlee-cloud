@@ -99,6 +99,8 @@ Create a `.env` file with your production settings:
 | `NODE_ENV`            | Set to `production` for production | Yes                     |
 | `PORT`                | API server port                    | No (default: 3000)      |
 | `DATABASE_URL`        | PostgreSQL connection string       | Yes                     |
+| `DB_POOL_MAX`         | Pool ceiling for PG connections    | No (default: 8)         |
+| `DB_SSL`              | Force enable/disable DB SSL        | No (auto-detected)      |
 | `REDIS_URL`           | Redis connection string            | Yes                     |
 | `S3_ENDPOINT`         | S3-compatible endpoint URL         | Yes                     |
 | `S3_ACCESS_KEY`       | S3 access key                      | Yes                     |
@@ -129,6 +131,30 @@ API_SECRET=your-secure-random-string-at-least-32-characters
 CORS_ORIGINS=https://your-domain.com
 ADMIN_EMAIL=admin@your-domain.com
 ADMIN_PASSWORD=your-secure-admin-password
+```
+
+### Connecting via PgBouncer / Connection Poolers
+
+Crawlee Cloud fully supports connecting via PgBouncer or managed connection poolers (Supabase, DigitalOcean Managed Database pooler, Neon, AWS RDS Proxy, or self-hosted PgBouncer).
+
+#### Non-SSL PgBouncer (Self-hosted or Docker)
+
+If your PgBouncer endpoint does not use TLS (e.g. running internally on port `6432`), disable SSL explicitly:
+
+```bash
+DATABASE_URL=postgresql://user:password@pgbouncer-host:6432/crawlee_cloud?sslmode=disable
+# Or explicitly:
+DB_SSL=false
+```
+
+#### SSL PgBouncer (Supabase, DigitalOcean, Neon)
+
+For managed poolers using TLS with self-signed or custom CA certificates:
+
+```bash
+DATABASE_URL=postgresql://user:password@pooler-host:6543/postgres?sslmode=require
+# Increase pool ceiling to let PgBouncer multiplex:
+DB_POOL_MAX=50
 ```
 
 ### Security Validation

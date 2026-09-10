@@ -19,6 +19,7 @@ import {
 import { getAvailableMemoryMb, getDiskUsageRatio } from './heartbeat.js';
 import { applyWebhookTemplate } from './webhook-template.js';
 import { resolveProxy } from './proxy-resolver.js';
+import { resolveDbSsl } from './db-ssl.js';
 
 const { Pool } = pg;
 
@@ -165,8 +166,13 @@ export function getActiveRunIds(): string[] {
  * Initialize job queue connections.
  */
 export async function initJobQueue(): Promise<void> {
+  const ssl = resolveDbSsl(config.databaseUrl, config.nodeEnv);
   pool = new Pool({
     connectionString: config.databaseUrl,
+    ssl: ssl !== undefined ? ssl : undefined,
+    max: config.dbPoolMax,
+    keepAlive: true,
+    keepAliveInitialDelayMillis: 10000,
   });
 
   redis = new Redis(config.redisUrl);

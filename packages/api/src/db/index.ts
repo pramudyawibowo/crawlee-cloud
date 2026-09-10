@@ -4,6 +4,9 @@
 
 import pg from 'pg';
 import { config } from '../config.js';
+import { resolveDbSsl } from './ssl.js';
+
+export { resolveDbSsl } from './ssl.js';
 
 const { Pool } = pg;
 
@@ -38,12 +41,14 @@ export const _dbState: { pool: pg.Pool } = {} as { pool: pg.Pool };
 export let pool: pg.Pool;
 
 export async function initDatabase(): Promise<void> {
-  const useSSL = config.databaseUrl.includes('sslmode=') || config.nodeEnv === 'production';
+  const ssl = resolveDbSsl(config.databaseUrl, config.nodeEnv);
 
   const p = new Pool({
     connectionString: config.databaseUrl,
-    ssl: useSSL ? { rejectUnauthorized: false } : undefined,
+    ssl: ssl !== undefined ? ssl : undefined,
     max: config.dbPoolMax,
+    keepAlive: true,
+    keepAliveInitialDelayMillis: 10000,
   });
 
   pool = p;

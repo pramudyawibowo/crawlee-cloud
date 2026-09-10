@@ -11,6 +11,8 @@ export interface Config {
 
   // Database
   databaseUrl: string;
+  dbPoolMax: number;
+  nodeEnv: string;
 
   // Redis for job queue
   redisUrl: string;
@@ -117,7 +119,9 @@ export const config: Config = {
   apiBaseUrl: env('API_BASE_URL', 'http://localhost:3000'),
   apiToken: env('API_TOKEN', 'runner-token'),
 
+  nodeEnv: env('NODE_ENV', 'development'),
   databaseUrl: env('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/crawlee_cloud'),
+  dbPoolMax: envInt('DB_POOL_MAX', 10),
   redisUrl: env('REDIS_URL', 'redis://localhost:6379'),
 
   dockerSocketPath: env('DOCKER_SOCKET', '/var/run/docker.sock'),

@@ -29,6 +29,7 @@
 
 import 'dotenv/config';
 import pg from 'pg';
+import { resolveDbSsl } from '../packages/api/src/db/ssl.js';
 
 const { Pool } = pg;
 
@@ -53,7 +54,11 @@ const chartCount = (() => {
   return next && /^\d+$/.test(next) ? parseInt(next, 10) : 100;
 })();
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const ssl = resolveDbSsl(process.env.DATABASE_URL ?? '');
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: ssl !== undefined ? ssl : undefined,
+});
 
 async function getSeedRefs(): Promise<{ userId: string; actorId: string }> {
   // Prefer the operator from .env (ADMIN_EMAIL); fall back to oldest admin.

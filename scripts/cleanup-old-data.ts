@@ -8,6 +8,7 @@
 
 import pg from 'pg';
 import { S3Client, DeleteObjectsCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
+import { resolveDbSsl } from '../packages/api/src/db/ssl.js';
 
 const { Pool } = pg;
 
@@ -23,7 +24,11 @@ const webhookRetentionDays = parseInt(getArg('webhook-retention-days', '30'), 10
 const batchSize = parseInt(getArg('batch-size', '100'), 10);
 
 // Initialize connections from env
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const ssl = resolveDbSsl(process.env.DATABASE_URL ?? '');
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: ssl !== undefined ? ssl : undefined,
+});
 const s3 = new S3Client({
   endpoint: process.env.S3_ENDPOINT,
   region: process.env.S3_REGION ?? 'us-east-1',
