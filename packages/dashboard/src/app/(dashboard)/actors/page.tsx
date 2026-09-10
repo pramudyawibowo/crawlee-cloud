@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { Plus, Search, Drama, Trash2 } from 'lucide-react';
 import { AppLink } from '@/components/app-link';
+import { Badge } from '@/components/ui/badge';
 import { CopyButton } from '@/components/ui/copy-button';
 import { Pagination } from '@/components/pagination';
 import { useConfirm } from '@/components/ui/confirm';
@@ -167,8 +168,13 @@ export default function ActorsPage() {
                     </button>
                   </span>
                 </div>
-                <h3 className="text-[15px] leading-tight text-foreground group-hover:text-signal transition-colors">
+                <h3 className="text-[15px] leading-tight text-foreground group-hover:text-signal transition-colors flex items-center gap-2">
                   {a.title || a.name}
+                  {a.priority && (
+                    <Badge variant="warning" shape="chip">
+                      PRIORITY
+                    </Badge>
+                  )}
                 </h3>
                 <p className="font-mono text-[11px] text-muted-foreground mt-1">
                   <span className="text-signal">@crawlee/</span>

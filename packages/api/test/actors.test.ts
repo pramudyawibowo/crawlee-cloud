@@ -48,6 +48,7 @@ const createActorRow = (overrides = {}) => ({
   title: 'Test Actor',
   description: 'A test actor',
   default_run_options: null,
+  priority: false,
   proxy_password_encrypted: null,
   created_at: new Date(),
   modified_at: new Date(),
@@ -213,6 +214,42 @@ describe('Actor Routes', () => {
       expect(response.statusCode).toBe(200);
     });
 
+    it('persists priority=true on create and echoes it in the response', async () => {
+      mockQuery
+        .mockResolvedValueOnce({ rows: [] }) // no existing
+        .mockResolvedValueOnce({ rows: [createActorRow({ priority: true })] });
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v2/acts',
+        payload: { name: 'test-actor', priority: true },
+      });
+
+      expect(response.statusCode).toBe(201);
+      const body = JSON.parse(response.body);
+      expect(body.data.priority).toBe(true);
+
+      const insertCall = mockQuery.mock.calls[1] as [string, unknown[]];
+      expect(insertCall[0]).toContain('INSERT INTO actors');
+      expect(insertCall[1]).toContain(true); // priority bound into the actor INSERT
+    });
+
+    it('omitting priority on update preserves the existing actor priority', async () => {
+      mockQuery
+        .mockResolvedValueOnce({ rows: [createActorRow({ priority: true })] }) // existing, already priority
+        .mockResolvedValueOnce({ rows: [createActorRow({ priority: true, title: 'Updated' })] });
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v2/acts',
+        payload: { name: 'test-actor', title: 'Updated' }, // no priority field
+      });
+
+      expect(response.statusCode).toBe(200);
+      const updateCall = mockQuery.mock.calls[1] as [string, unknown[]];
+      expect(updateCall[1]).toContain(true); // existing priority=true carried forward
+    });
+
     it('should accept image and envVars in defaultRunOptions', async () => {
       const defaultRunOptions = {
         image: 'ghcr.io/example/repo/actor-foo:latest',
@@ -348,6 +385,26 @@ describe('Actor Routes', () => {
       });
 
       expect(response.statusCode).toBe(200);
+    });
+
+    it('should persist priority on update', async () => {
+      mockQuery.mockResolvedValueOnce({
+        rows: [createActorRow({ priority: true })],
+      });
+
+      const response = await app.inject({
+        method: 'PUT',
+        url: '/v2/acts/actor-1',
+        payload: { priority: true },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body);
+      expect(body.data.priority).toBe(true);
+
+      const updateCall = mockQuery.mock.calls[0] as [string, unknown[]];
+      expect(updateCall[0]).toMatch(/priority = \$/);
+      expect(updateCall[1]).toContain(true);
     });
 
     it('should persist defaultRunOptions on update', async () => {
@@ -591,6 +648,132 @@ describe('Actor Routes', () => {
       });
 
       expect(response.statusCode).toBe(404);
+    });
+
+    it('persists priority=true in the run INSERT and echoes it in the response', async () => {
+      mockQuery
+        .mockResolvedValueOnce({ rows: [createActorRow()] }) // get actor
+        .mockResolvedValueOnce({ rows: [] }) // dataset insert
+        .mockResolvedValueOnce({ rows: [] }) // kv store insert
+        .mockResolvedValueOnce({ rows: [] }) // queue insert
+        .mockResolvedValueOnce({ rows: [] }) // build lookup
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              id: 'run-1',
+              actor_id: 'actor-1',
+              status: 'READY',
+              started_at: null,
+              default_dataset_id: 'ds-1',
+              default_key_value_store_id: 'kv-1',
+              default_request_queue_id: 'rq-1',
+              timeout_secs: 3600,
+              memory_mbytes: 1024,
+              created_at: new Date(),
+            },
+          ],
+        });
+
+      mockRedisPublish.mockResolvedValueOnce(1);
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v2/acts/actor-1/runs',
+        payload: { priority: true },
+      });
+
+      expect(response.statusCode).toBe(201);
+      const body = JSON.parse(response.body);
+      expect(body.data.priority).toBe(true);
+
+      const insertCall = mockQuery.mock.calls[mockQuery.mock.calls.length - 1] as [
+        string,
+        unknown[],
+      ];
+      expect(insertCall[0]).toContain('INSERT INTO runs');
+      expect(insertCall[1]).toContain(true); // priority bound into the INSERT
+    });
+
+    it('a priority actor always stamps its runs priority=true, even without a per-run flag', async () => {
+      // feat/actor-priority: marking the actor itself as priority means
+      // every run it starts is always priority — no per-run opt-in needed.
+      mockQuery
+        .mockResolvedValueOnce({ rows: [createActorRow({ priority: true })] }) // get actor
+        .mockResolvedValueOnce({ rows: [] }) // dataset
+        .mockResolvedValueOnce({ rows: [] }) // kv
+        .mockResolvedValueOnce({ rows: [] }) // queue
+        .mockResolvedValueOnce({ rows: [] }) // build lookup
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              id: 'run-1',
+              actor_id: 'actor-1',
+              status: 'READY',
+              started_at: null,
+              default_dataset_id: 'ds-1',
+              default_key_value_store_id: 'kv-1',
+              default_request_queue_id: 'rq-1',
+              timeout_secs: 3600,
+              memory_mbytes: 1024,
+              created_at: new Date(),
+            },
+          ],
+        });
+
+      mockRedisPublish.mockResolvedValueOnce(1);
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v2/acts/actor-1/runs',
+        payload: {}, // no priority in the request body
+      });
+
+      expect(response.statusCode).toBe(201);
+      const body = JSON.parse(response.body);
+      expect(body.data.priority).toBe(true);
+
+      const insertCall = mockQuery.mock.calls[mockQuery.mock.calls.length - 1] as [
+        string,
+        unknown[],
+      ];
+      expect(insertCall[1]).toContain(true); // priority bound into the run INSERT
+    });
+
+    it('defaults priority to false when omitted from the request body', async () => {
+      mockQuery
+        .mockResolvedValueOnce({ rows: [createActorRow()] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              id: 'run-1',
+              actor_id: 'actor-1',
+              status: 'READY',
+              started_at: null,
+              default_dataset_id: 'ds-1',
+              default_key_value_store_id: 'kv-1',
+              default_request_queue_id: 'rq-1',
+              timeout_secs: 3600,
+              memory_mbytes: 1024,
+              created_at: new Date(),
+            },
+          ],
+        });
+
+      mockRedisPublish.mockResolvedValueOnce(1);
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v2/acts/actor-1/runs',
+        payload: {},
+      });
+
+      expect(response.statusCode).toBe(201);
+      const body = JSON.parse(response.body);
+      expect(body.data.priority).toBe(false);
     });
 
     it("inherits timeout/memory from actor's default_run_options when request body omits them", async () => {

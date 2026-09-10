@@ -32,6 +32,7 @@ interface ActorRow {
   default_run_options: Record<string, unknown> | null;
   max_retries: number;
   retry_delay_secs: number;
+  priority: boolean;
   proxy_password_encrypted: string | null;
   created_at: Date;
   modified_at: Date;
@@ -229,6 +230,7 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
       defaultRunOptions?: Record<string, unknown>;
       maxRetries?: number;
       retryDelaySecs?: number;
+      priority?: boolean;
       proxyPassword?: string | null;
     };
   }>('/acts', async (request, reply) => {
@@ -239,6 +241,7 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
       defaultRunOptions,
       maxRetries,
       retryDelaySecs,
+      priority,
       version,
       proxyPassword,
     } = CreateActorSchema.parse(request.body);
@@ -273,8 +276,8 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
         UPDATE actors
         SET title = $1, description = $2, default_run_options = $3,
             max_retries = $4, retry_delay_secs = $5,
-            proxy_password_encrypted = $6, modified_at = NOW()
-        WHERE id = $7
+            priority = $6, proxy_password_encrypted = $7, modified_at = NOW()
+        WHERE id = $8
         RETURNING *
       `,
         [
@@ -285,6 +288,7 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
             : existing.rows[0].default_run_options,
           maxRetries ?? existing.rows[0].max_retries,
           retryDelaySecs ?? existing.rows[0].retry_delay_secs,
+          priority ?? existing.rows[0].priority,
           proxyParam === undefined ? existing.rows[0].proxy_password_encrypted : proxyParam,
           existing.rows[0].id,
         ]
@@ -304,8 +308,8 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
     const id = nanoid();
     const result = await query<ActorRow>(
       `
-      INSERT INTO actors (id, name, user_id, title, description, default_run_options, max_retries, retry_delay_secs, proxy_password_encrypted, org_id)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      INSERT INTO actors (id, name, user_id, title, description, default_run_options, max_retries, retry_delay_secs, priority, proxy_password_encrypted, org_id)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
       RETURNING *
     `,
       [
@@ -317,6 +321,7 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
         defaultRunOptions ? JSON.stringify(defaultRunOptions) : null,
         maxRetries ?? 0,
         retryDelaySecs ?? 60,
+        priority ?? false,
         encryptIfSet(proxyPassword) ?? null,
         ws.orgId || null,
       ]
@@ -362,6 +367,7 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
       defaultRunOptions?: Record<string, unknown>;
       maxRetries?: number;
       retryDelaySecs?: number;
+      priority?: boolean;
       proxyPassword?: string | null;
       version?: string;
     };
@@ -397,6 +403,10 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
     if (updates.retryDelaySecs !== undefined) {
       setClauses.push(`retry_delay_secs = $${paramIndex++}`);
       values.push(updates.retryDelaySecs);
+    }
+    if (updates.priority !== undefined) {
+      setClauses.push(`priority = $${paramIndex++}`);
+      values.push(updates.priority);
     }
     if (updates.proxyPassword !== undefined) {
       setClauses.push(`proxy_password_encrypted = $${paramIndex++}`);
@@ -565,6 +575,7 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
         payloadTemplate?: string;
         headersTemplate?: string;
       }>;
+      priority?: boolean;
     };
   }>('/acts/:actorId/runs', async (request, reply) => {
     const { actorId } = request.params;
@@ -594,6 +605,10 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
     } | null;
     const timeout = parsed.timeout ?? actorDefaults?.timeoutSecs ?? 3600;
     const memory = parsed.memory ?? actorDefaults?.memoryMbytes ?? 1024;
+    // A priority actor always runs as priority — this ORs in, never
+    // overrides the per-run flag off, so requesting priority=true on a
+    // non-priority actor's run still works too.
+    const priority = actor.rows[0].priority || parsed.priority;
 
     // Create default storages for this run
     const datasetId = nanoid();
@@ -653,8 +668,8 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
       created_at: Date;
     }>(
       `
-      INSERT INTO runs (id, actor_id, user_id, org_id, status, default_dataset_id, default_key_value_store_id, default_request_queue_id, timeout_secs, memory_mbytes, build_id, build_number)
-      VALUES ($1, $2, $3, $4, 'READY', $5, $6, $7, $8, $9, $10, $11)
+      INSERT INTO runs (id, actor_id, user_id, org_id, status, default_dataset_id, default_key_value_store_id, default_request_queue_id, timeout_secs, memory_mbytes, build_id, build_number, priority)
+      VALUES ($1, $2, $3, $4, 'READY', $5, $6, $7, $8, $9, $10, $11, $12)
       RETURNING *
     `,
       [
@@ -669,6 +684,7 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
         memory,
         buildId,
         buildNumber,
+        priority,
       ]
     );
 
@@ -727,6 +743,7 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
         defaultDatasetId: datasetId,
         defaultKeyValueStoreId: kvStoreId,
         defaultRequestQueueId: requestQueueId,
+        priority,
       },
     };
   });
@@ -758,6 +775,7 @@ function formatActor(row: ActorRow) {
     defaultRunOptions: row.default_run_options,
     maxRetries: row.max_retries,
     retryDelaySecs: row.retry_delay_secs,
+    priority: row.priority,
     hasProxyOverride: row.proxy_password_encrypted !== null,
     createdAt: row.created_at,
     modifiedAt: row.modified_at,

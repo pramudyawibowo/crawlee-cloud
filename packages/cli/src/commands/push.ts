@@ -42,6 +42,10 @@ interface ActorJson {
     timeoutSecs?: number;
     memoryMbytes?: number;
   };
+  // When true, every run created for this actor always skips ahead of the
+  // non-priority queue (runs.priority). A top-level actor column, not a
+  // run option — mirrors maxRetries/retryDelaySecs, not defaultRunOptions.
+  priority?: boolean;
 }
 
 export function validateActorJson(actorJson: ActorJson): string[] {
@@ -219,16 +223,25 @@ export const pushCommand = new Command('push')
         image?: string;
         envVars?: Record<string, string>;
       } = {};
+      // Same baseline-preservation rationale for the top-level `priority`
+      // column: a dashboard toggle not re-declared in actor.json must
+      // survive a push, not silently revert to false.
+      let existingPriority = false;
       const lookupRes = await fetch(
         `${config.apiBaseUrl}/v2/acts/${encodeURIComponent(actorName)}`,
         { headers: { Authorization: `Bearer ${config.token}` } }
       );
       if (lookupRes.ok) {
         const lookupData = (await lookupRes.json()) as {
-          data?: { id?: string; defaultRunOptions?: typeof existingDefaultRunOptions };
+          data?: {
+            id?: string;
+            defaultRunOptions?: typeof existingDefaultRunOptions;
+            priority?: boolean;
+          };
         };
         existingId = lookupData.data?.id ?? null;
         existingDefaultRunOptions = lookupData.data?.defaultRunOptions ?? {};
+        existingPriority = lookupData.data?.priority ?? false;
       }
 
       // Resolve actor default env vars. Precedence (later wins):
@@ -271,6 +284,9 @@ export const pushCommand = new Command('push')
         // an actor_versions row and link the build to it. Apify uses this
         // for the version selector on the dashboard's build history.
         version: actorJson.version,
+        // Only override when actor.json explicitly declares it — otherwise
+        // preserve whatever was already set (e.g. via the dashboard).
+        priority: actorJson.priority !== undefined ? actorJson.priority : existingPriority,
         defaultRunOptions: {
           ...existingDefaultRunOptions, // dashboard state baseline
           image: runtimeImage, // always asserted (this push's build)

@@ -111,6 +111,8 @@ export interface Actor {
   defaultRunOptions?: ActorDefaultRunOptions;
   maxRetries?: number;
   retryDelaySecs?: number;
+  /** When true, every run created for this actor always skips ahead of the non-priority queue. */
+  priority?: boolean;
   hasProxyOverride: boolean;
   createdAt: string;
   modifiedAt: string;
@@ -1019,6 +1021,7 @@ export async function updateActor(
     defaultRunOptions: ActorDefaultRunOptions;
     maxRetries: number;
     retryDelaySecs: number;
+    priority: boolean;
     proxyPassword: string | null;
   }>
 ): Promise<Actor> {
