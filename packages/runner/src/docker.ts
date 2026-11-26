@@ -939,12 +939,15 @@ export async function pullImageIfNeeded(
   const waiterAbortCheck = isAborted ?? (() => false);
 
   // Coalesce concurrent pulls for the exact same image ref (singleflight).
+  // IMPORTANT: keep the check-and-insert into inFlightPulls completely
+  // synchronous (no await before inFlightPulls.set) so concurrent runs
+  // arriving in the same tick coalesce instead of launching duplicate pulls.
   const existingPull = inFlightPulls.get(image);
   if (existingPull) {
-    console.log(`[${runId}] Joining in-flight pull for ${image}...`);
-    await log(runId, 'INFO', `Waiting for in-flight image pull ${image}...`);
     const waiters = inFlightWaiters.get(image);
     waiters?.add(waiterAbortCheck);
+    console.log(`[${runId}] Joining in-flight pull for ${image}...`);
+    void log(runId, 'INFO', `Waiting for in-flight image pull ${image}...`);
     try {
       await waitForPullOrAbort(existingPull, isAborted);
     } finally {
@@ -953,10 +956,6 @@ export async function pullImageIfNeeded(
     imageLastUsedAt.set(image, now());
     return;
   }
-
-  // Start a new pull and publish the promise so concurrent runs coalesce onto it.
-  console.log(`[${runId}] Pulling image ${image}...`);
-  await log(runId, 'INFO', `Pulling image ${image}...`);
 
   const auth = getRegistryAuth(image);
   const pullOnce: (img: string) => Promise<void> =
@@ -991,39 +990,42 @@ export async function pullImageIfNeeded(
   // Two retries with backoff ride out registry/stream blips; permanent errors
   // (404, 401, ENOSPC) fail fast via isRetryablePullError.
   const pullPromise = (async () => {
-    try {
-      await pullWithRetries(() => pullOnce(image), {
-        delaysMs: retryDelaysMs,
-        isAborted: allWaitersAborted,
-        shouldRetry: isRetryablePullError,
-        sleep: deps.sleep,
-        onRetry: async (attemptNo, err) => {
-          console.warn(`[${runId}] Pull attempt ${String(attemptNo)} failed: ${err.message}`);
-          await log(
-            runId,
-            'WARN',
-            `Image pull attempt ${String(attemptNo)} failed (${err.message}); retrying...`
-          );
-        },
-      });
-      const ts = now();
-      imageLastPulledAt.set(image, ts);
-      imageLastUsedAt.set(image, ts);
-      console.log(`[${runId}] Image ${image} pulled successfully`);
-      await log(runId, 'INFO', `Image ${image} pulled successfully`);
-    } finally {
+    console.log(`[${runId}] Pulling image ${image}...`);
+    await log(runId, 'INFO', `Pulling image ${image}...`);
+    await pullWithRetries(() => pullOnce(image), {
+      delaysMs: retryDelaysMs,
+      isAborted: allWaitersAborted,
+      shouldRetry: isRetryablePullError,
+      sleep: deps.sleep,
+      onRetry: async (attemptNo, err) => {
+        console.warn(`[${runId}] Pull attempt ${String(attemptNo)} failed: ${err.message}`);
+        await log(
+          runId,
+          'WARN',
+          `Image pull attempt ${String(attemptNo)} failed (${err.message}); retrying...`
+        );
+      },
+    });
+    const ts = now();
+    imageLastPulledAt.set(image, ts);
+    imageLastUsedAt.set(image, ts);
+    console.log(`[${runId}] Image ${image} pulled successfully`);
+    await log(runId, 'INFO', `Image ${image} pulled successfully`);
+  })();
+
+  inFlightPulls.set(image, pullPromise);
+  // Clean up tracking maps once the pull settles, and swallow unhandled
+  // rejections if every waiter exited early via abort.
+  void pullPromise
+    .finally(() => {
       if (inFlightPulls.get(image) === pullPromise) {
         inFlightPulls.delete(image);
       }
       if (inFlightWaiters.get(image) === waiters) {
         inFlightWaiters.delete(image);
       }
-    }
-  })();
-
-  // Prevent unhandled rejection if every waiter exits early via abort.
-  pullPromise.catch(() => undefined);
-  inFlightPulls.set(image, pullPromise);
+    })
+    .catch(() => undefined);
 
   try {
     await waitForPullOrAbort(pullPromise, isAborted);
