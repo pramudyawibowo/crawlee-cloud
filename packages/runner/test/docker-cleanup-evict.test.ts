@@ -16,12 +16,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type Docker from 'dockerode';
 import { config } from '../src/config.js';
-import { cleanupDocker } from '../src/docker.js';
+import { cleanupDocker, resetImagePullState } from '../src/docker.js';
 
 interface FakeImage {
   Id: string;
   RepoTags?: string[];
   Size?: number;
+  Created?: number;
 }
 
 function fakeDocker(images: FakeImage[] = []) {
@@ -53,6 +54,7 @@ function fakeDocker(images: FakeImage[] = []) {
 const originalRegistry = config.imageRegistry;
 
 beforeEach(() => {
+  resetImagePullState();
   vi.spyOn(console, 'log').mockImplementation(() => undefined);
   vi.spyOn(console, 'warn').mockImplementation(() => undefined);
   vi.spyOn(console, 'error').mockImplementation(() => undefined);
@@ -145,5 +147,35 @@ describe('cleanupDocker disk-pressure eviction', () => {
     await cleanupDocker({ dockerClient: docker, getDiskUsageRatio: () => 0.9 });
 
     expect(removeCalls).toEqual(['ghcr.io/test-org/actor-idle:latest']);
+  });
+
+  it('evicts oldest images first and stops once disk drops below target watermark', async () => {
+    let diskRatio = 0.85;
+    const { docker, removeCalls } = fakeDocker([
+      {
+        Id: 'sha256:new',
+        RepoTags: ['ghcr.io/test-org/actor-hot:latest'],
+        Size: 3_000_000_000,
+        Created: 2000,
+      },
+      {
+        Id: 'sha256:old',
+        RepoTags: ['ghcr.io/test-org/actor-cold:latest'],
+        Size: 3_000_000_000,
+        Created: 1000,
+      },
+    ]);
+    docker.getImage.mockImplementation((tag: string) => ({
+      remove: vi.fn(() => {
+        removeCalls.push(tag);
+        diskRatio = 0.65; // Below 80% - 10% = 70% target watermark
+        return Promise.resolve();
+      }),
+    }));
+
+    await cleanupDocker({ dockerClient: docker, getDiskUsageRatio: () => diskRatio });
+
+    // Only the oldest image is evicted; hot image stays warm on disk.
+    expect(removeCalls).toEqual(['ghcr.io/test-org/actor-cold:latest']);
   });
 });

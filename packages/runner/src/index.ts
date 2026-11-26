@@ -16,6 +16,7 @@ import {
   cleanupDocker,
   startPeriodicCleanup,
   stopPeriodicCleanup,
+  prewarmConfiguredImages,
 } from './docker.js';
 import {
   initJobQueue,
@@ -34,6 +35,9 @@ async function main() {
   console.log(`Max concurrent runs: ${String(config.maxConcurrentRuns)}`);
   console.log(`Default memory: ${String(config.defaultMemoryMb)}MB`);
   console.log(`Default timeout: ${String(config.defaultTimeoutSecs)}s`);
+  console.log(
+    `Image pull policy: ${config.imagePullPolicy} (cache TTL: ${String(config.imagePullCacheTtlSecs)}s)`
+  );
   console.log('='.repeat(60));
 
   // Check Docker connectivity
@@ -56,6 +60,12 @@ async function main() {
   await cleanupDocker();
   startPeriodicCleanup();
 
+  // Pre-warm configured actor/base images in the background (non-blocking).
+  // Any run arriving mid-prewarm coalesces onto the in-flight pull.
+  if (config.prewarmImages.length > 0) {
+    void prewarmConfiguredImages();
+  }
+
   // Initialize job queue
   console.log('Initializing job queue...');
   await initJobQueue();
@@ -64,6 +74,9 @@ async function main() {
   // config.runnerId is the same identity claimNextRun stamps onto runs
   // (runner_id column) — heartbeats and cost attribution must agree.
   const heartbeatRedis = new Redis(config.redisUrl);
+  heartbeatRedis.on('error', (err) => {
+    console.warn(`[Heartbeat] Redis error: ${err.message}`);
+  });
   const runnerId = config.runnerId;
   startHeartbeat(
     heartbeatRedis,

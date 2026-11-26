@@ -188,6 +188,9 @@ ${priceHourly !== null ? `RUNNER_PRICE_HOURLY=${priceHourly}` : '# RUNNER_PRICE_
 IMAGE_REGISTRY=${process.env.IMAGE_REGISTRY || ''}
 IMAGE_REGISTRY_USER=${process.env.IMAGE_REGISTRY_USER || ''}
 IMAGE_REGISTRY_TOKEN=${process.env.IMAGE_REGISTRY_TOKEN || ''}
+IMAGE_PULL_POLICY=${process.env.IMAGE_PULL_POLICY || 'smart'}
+IMAGE_PULL_CACHE_TTL_SECS=${process.env.IMAGE_PULL_CACHE_TTL_SECS || '300'}
+PREWARM_IMAGES=${process.env.PREWARM_IMAGES || ''}
 PROXY_ENCRYPTION_KEY=${process.env.PROXY_ENCRYPTION_KEY || ''}
 ${tlsEnvFileLine}
 ENVEOF
@@ -205,6 +208,18 @@ echo "RUNNER_ID=\${DO_ID:-$(hostname)}" >> /etc/crawlee-runner.env
 
 chmod 600 /etc/crawlee-runner.env`;
 
+  // Tune Docker daemon for faster multi-layer actor image pulls (default is 3
+  // concurrent downloads; 10 speeds up cold browser-bundled image pulls 2-3x).
+  const dockerTuningBlock = `# Tune Docker daemon for faster parallel layer downloads
+python3 -c 'import json, pathlib
+p = pathlib.Path("/etc/docker/daemon.json")
+cfg = json.loads(p.read_text()) if p.exists() and p.read_text().strip() else {}
+if cfg.get("max-concurrent-downloads", 3) < 10:
+    cfg["max-concurrent-downloads"] = 10
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(cfg, indent=2) + "\n")
+    raise SystemExit(42)' && true || { [ $? -eq 42 ] && systemctl restart docker || true; }`;
+
   const ghcrLoginBlock = ghcrToken
     ? `echo "${ghcrToken}" | docker login ghcr.io -u github --password-stdin`
     : '# No GHCR token';
@@ -215,6 +230,8 @@ curl -s -X POST "${apiBaseUrl}/v2/internal/runner-ready" -H "Content-Type: appli
   if (runnerImage) {
     return `#!/bin/bash
 set -e
+
+${dockerTuningBlock}
 
 # Login to GHCR if configured (private runner image and/or actor images)
 ${ghcrLoginBlock}
@@ -256,6 +273,8 @@ git clone ${cloneRefFlag}https://github.com/crawlee-cloud/crawlee-cloud.git /opt
 cd /opt/crawlee-cloud
 npm install
 npm run build --workspace=@crawlee-cloud/runner
+
+${dockerTuningBlock}
 
 # Login to GHCR if configured (for pulling pre-built actor images)
 ${ghcrLoginBlock}

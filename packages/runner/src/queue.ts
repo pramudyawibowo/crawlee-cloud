@@ -15,6 +15,7 @@ import {
   writeLifecycleLog,
   clampMemoryToHost,
   cleanupDocker,
+  invalidateImagePullCache,
 } from './docker.js';
 import { getAvailableMemoryMb, getDiskUsageRatio } from './heartbeat.js';
 import { applyWebhookTemplate } from './webhook-template.js';
@@ -177,6 +178,9 @@ export async function initJobQueue(): Promise<void> {
   });
 
   redis = new Redis(config.redisUrl);
+  redis.on('error', (err) => {
+    console.warn(`[Runner/Queue] Redis error: ${err.message}`);
+  });
 
   // Fetch runner API key from Redis (created by API's setupAdminUser)
   runnerApiKey = await redis.get(RUNNER_API_KEY_REDIS_KEY);
@@ -189,9 +193,12 @@ export async function initJobQueue(): Promise<void> {
     console.warn('Make sure the API server has started and created the runner key.');
   }
 
-  // Subscribe to run notifications
+  // Subscribe to run and image-update notifications
   const subscriber = new Redis(config.redisUrl);
-  await subscriber.subscribe('run:new', 'run:abort');
+  subscriber.on('error', (err) => {
+    console.warn(`[Runner/Queue] Redis subscriber error: ${err.message}`);
+  });
+  await subscriber.subscribe('run:new', 'run:abort', 'actor:image-updated');
 
   const onAbort = createAbortHandler(
     () => activeRunIds,
@@ -202,6 +209,12 @@ export async function initJobQueue(): Promise<void> {
   subscriber.on('message', (channel, message) => {
     if (channel === 'run:abort') {
       void onAbort(message);
+      return;
+    }
+    if (channel === 'actor:image-updated') {
+      const image = message.trim();
+      invalidateImagePullCache(image || undefined);
+      console.log(`[Runner] Invalidated image pull cache for ${image || 'all images'}`);
       return;
     }
     console.log(`New run notification: ${message}`);

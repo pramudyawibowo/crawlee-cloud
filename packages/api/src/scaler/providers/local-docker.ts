@@ -109,6 +109,20 @@ export class LocalDockerProvider implements RunnerProvider {
       ...(process.env.DB_SSL ? { DB_SSL: process.env.DB_SSL } : {}),
       ...(process.env.DB_POOL_MAX ? { DB_POOL_MAX: process.env.DB_POOL_MAX } : {}),
       ...(process.env.NODE_ENV ? { NODE_ENV: process.env.NODE_ENV } : {}),
+      ...(process.env.IMAGE_REGISTRY ? { IMAGE_REGISTRY: process.env.IMAGE_REGISTRY } : {}),
+      ...(process.env.IMAGE_REGISTRY_USER
+        ? { IMAGE_REGISTRY_USER: process.env.IMAGE_REGISTRY_USER }
+        : {}),
+      ...(process.env.IMAGE_REGISTRY_TOKEN
+        ? { IMAGE_REGISTRY_TOKEN: process.env.IMAGE_REGISTRY_TOKEN }
+        : {}),
+      ...(process.env.IMAGE_PULL_POLICY
+        ? { IMAGE_PULL_POLICY: process.env.IMAGE_PULL_POLICY }
+        : {}),
+      ...(process.env.IMAGE_PULL_CACHE_TTL_SECS
+        ? { IMAGE_PULL_CACHE_TTL_SECS: process.env.IMAGE_PULL_CACHE_TTL_SECS }
+        : {}),
+      ...(process.env.PREWARM_IMAGES ? { PREWARM_IMAGES: process.env.PREWARM_IMAGES } : {}),
     };
 
     const envArray = Object.entries(env).map(([k, v]) => `${k}=${v}`);

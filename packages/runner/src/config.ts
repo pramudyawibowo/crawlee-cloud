@@ -4,6 +4,8 @@
 
 import os from 'node:os';
 
+export type ImagePullPolicy = 'smart' | 'if-not-present' | 'always';
+
 export interface Config {
   // API connection
   apiBaseUrl: string;
@@ -26,6 +28,19 @@ export interface Config {
   imageRegistry: string;
   imageRegistryUser: string;
   imageRegistryToken: string;
+
+  // Image pull caching & optimization:
+  // - 'smart' (default): skip pull for local images, immutable @sha256 digests,
+  //   and registry images already pulled within imagePullCacheTtlSecs (invalidated
+  //   immediately when an actor is re-pushed via Redis `actor:image-updated`).
+  // - 'if-not-present': skip remote pull whenever the image already exists locally.
+  // - 'always': always contact the registry for registry images (still deduplicated
+  //   across concurrent runs via singleflight).
+  imagePullPolicy: ImagePullPolicy;
+  imagePullCacheTtlSecs: number;
+  // Optional comma-separated list of actor/base images to pre-pull in the background
+  // when a runner starts so cold runs don't block on multi-GB downloads.
+  prewarmImages: string[];
 
   // Container defaults
   defaultMemoryMb: number;
@@ -115,6 +130,23 @@ function envFloatOrNull(key: string): number | null {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
+function envPullPolicy(key: string, defaultValue: ImagePullPolicy): ImagePullPolicy {
+  const raw = process.env[key]?.trim().toLowerCase();
+  if (!raw) return defaultValue;
+  if (raw === 'smart' || raw === 'if-not-present' || raw === 'always') return raw;
+  console.warn(`[Runner] Ignoring invalid ${key}="${raw}" — using default "${defaultValue}"`);
+  return defaultValue;
+}
+
+function envStringList(key: string): string[] {
+  const raw = process.env[key];
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 export const config: Config = {
   apiBaseUrl: env('API_BASE_URL', 'http://localhost:3000'),
   apiToken: env('API_TOKEN', 'runner-token'),
@@ -130,6 +162,9 @@ export const config: Config = {
   imageRegistry: env('IMAGE_REGISTRY', ''),
   imageRegistryUser: env('IMAGE_REGISTRY_USER', ''),
   imageRegistryToken: env('IMAGE_REGISTRY_TOKEN', ''),
+  imagePullPolicy: envPullPolicy('IMAGE_PULL_POLICY', 'smart'),
+  imagePullCacheTtlSecs: envInt('IMAGE_PULL_CACHE_TTL_SECS', 300),
+  prewarmImages: envStringList('PREWARM_IMAGES'),
 
   defaultMemoryMb: envInt('DEFAULT_MEMORY_MB', 1024),
   defaultTimeoutSecs: envInt('DEFAULT_TIMEOUT_SECS', 3600),

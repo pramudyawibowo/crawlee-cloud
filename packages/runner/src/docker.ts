@@ -2,7 +2,7 @@
  * Docker container executor.
  *
  * This module handles:
- * - Pulling Actor images
+ * - Pulling Actor images (with singleflight dedup, TTL freshness cache & digest skip)
  * - Creating containers with proper environment variables
  * - Starting and monitoring containers
  * - Collecting logs and exit codes
@@ -11,7 +11,7 @@
 import os from 'node:os';
 import Docker from 'dockerode';
 import { Redis } from 'ioredis';
-import { config } from './config.js';
+import { config, type ImagePullPolicy } from './config.js';
 import { getDiskUsageRatio } from './heartbeat.js';
 import { waitWithTimeout } from './wait.js';
 
@@ -93,9 +93,9 @@ export interface RunResult {
    */
   oomKilled: boolean;
   /**
-   * Peak observed working-set memory in MB, sampled every 15s from the
-   * Docker stats API while the container ran. Null = unmeasured (run
-   * shorter than one tick, aborted before start, or stats failures).
+   * Peak observed working-set memory in MB, sampled from the Docker stats
+   * API while the container ran. Null = unmeasured (run shorter than one
+   * tick, aborted before start, or stats failures).
    * Persisted to runs.peak_memory_mb — the basis for per-actor memory
    * right-sizing.
    */
@@ -108,6 +108,87 @@ const docker = new Docker({
 
 // Redis for log streaming
 const redis = new Redis(config.redisUrl);
+redis.on('error', (err) => {
+  console.warn(`[Runner/Docker] Redis error: ${err.message}`);
+});
+
+// ---- Image pull coordination & LRU tracking ----
+
+/** Active pull promises keyed by image ref (singleflight deduplication). */
+const inFlightPulls = new Map<string, Promise<void>>();
+/** Abort predicates of all callers currently awaiting each in-flight pull. */
+const inFlightWaiters = new Map<string, Set<() => boolean>>();
+/** Epoch ms when an image ref was last verified/pulled from a remote registry. */
+const imageLastPulledAt = new Map<string, number>();
+/** Epoch ms when an image ref was last used by a run (feeds LRU disk eviction). */
+const imageLastUsedAt = new Map<string, number>();
+
+/**
+ * Invalidate cached pull freshness for a specific image (or all images when
+ * omitted). Called when the API notifies runners via Redis `actor:image-updated`
+ * after an actor push/update, or when cleanup evicts an image tag.
+ */
+export function invalidateImagePullCache(image?: string): void {
+  if (image) {
+    imageLastPulledAt.delete(image);
+  } else {
+    imageLastPulledAt.clear();
+  }
+}
+
+/** Reset in-memory pull/LRU maps (unit test helper). */
+export function resetImagePullState(): void {
+  inFlightPulls.clear();
+  inFlightWaiters.clear();
+  imageLastPulledAt.clear();
+  imageLastUsedAt.clear();
+}
+
+/**
+ * True when an image ref is pinned to an immutable content digest
+ * (e.g. `ghcr.io/org/actor:latest@sha256:...` or `ghcr.io/org/actor@sha256:...`).
+ * Content-addressed refs cannot change upstream — once present locally,
+ * re-pulling is always redundant.
+ */
+export function isImmutableImageRef(image: string): boolean {
+  return /@sha(?:256|512):[0-9a-fA-F]{64,128}$/.test(image);
+}
+
+/**
+ * True when `image` lives under the configured `IMAGE_REGISTRY` prefix.
+ * Uses boundary-aware prefix matching rather than loose `.includes()`.
+ */
+export function isConfiguredRegistryImage(image: string, registry: string): boolean {
+  const normalized = registry.trim().replace(/\/+$/, '');
+  if (!normalized) return false;
+  return image === normalized || image.startsWith(`${normalized}/`);
+}
+
+/**
+ * Classify whether a docker pull error is transient and worth retrying.
+ * Permanent errors (404/manifest unknown, auth failure, invalid ref, full disk)
+ * will never succeed 5s later — failing fast avoids wasting 20s and holding
+ * a concurrency slot.
+ */
+export function isRetryablePullError(err: Error): boolean {
+  const msg = err.message.toLowerCase();
+  const permanentPatterns = [
+    'manifest unknown',
+    'not found',
+    'http code 404',
+    'http code 401',
+    'http code 403',
+    'http code 400',
+    'unauthorized',
+    'authentication required',
+    'denied',
+    'pull access denied',
+    'repository does not exist',
+    'invalid reference format',
+    'no space left on device',
+  ];
+  return !permanentPatterns.some((p) => msg.includes(p));
+}
 
 /**
  * Minimal Redis surface the log writer needs — lets tests inject a mock
@@ -441,7 +522,7 @@ export async function executeRun(options: RunOptions): Promise<RunResult> {
   // Build environment variables array
   const envArray = Object.entries(env).map(([key, value]) => `${key}=${value}`);
 
-  // Pull image if not exists
+  // Pull image if not exists (or stale)
   try {
     await pullImageIfNeeded(image, runId, options.isAborted);
   } catch (err) {
@@ -524,19 +605,20 @@ export async function executeRun(options: RunOptions): Promise<RunResult> {
   await container.start();
   console.log(`[${runId}] Container started`);
 
-  // Peak working-set sampling for per-actor right-sizing: memory_mbytes
-  // limits are operator guesses (2026-07-16: poulpeo OOMed at 1024 AND
-  // 2048 while radins reserved 2048 and co-ran fine), and recorded
-  // actuals turn sizing — and any future reservation/overcommit packing —
-  // into a data question. Best-effort by design: a missed sample only
-  // means a slightly-low peak. The void-async + inner catch shape keeps
-  // a stats rejection from ever becoming an unhandled rejection (the
-  // crash-bomb class), and unref keeps the timer from pinning shutdown.
+  // Peak working-set sampling for per-actor right-sizing. Guard against
+  // overlapping `container.stats({ stream: false })` calls: Docker's
+  // one-shot stats API takes ~1s per call (computing CPU deltas), so an
+  // unguarded 1s interval piles up concurrent daemon requests under load.
   let peakMemoryMb: number | null = null;
+  let statsInFlight = false;
+  let statsStopped = false;
   const statsTimer = setInterval(() => {
+    if (statsInFlight || statsStopped) return;
+    statsInFlight = true;
     void (async () => {
       try {
         const stats: unknown = await container.stats({ stream: false });
+        if (statsStopped) return;
         const usedMb = memoryUsageMbFromStats(stats);
         if (usedMb !== null) {
           if (usedMb > (peakMemoryMb ?? -1)) peakMemoryMb = usedMb;
@@ -554,6 +636,8 @@ export async function executeRun(options: RunOptions): Promise<RunResult> {
         }
       } catch {
         // Container exited between ticks, or a stats-API hiccup — fine.
+      } finally {
+        statsInFlight = false;
       }
     })();
   }, STATS_SAMPLE_INTERVAL_MS);
@@ -565,7 +649,10 @@ export async function executeRun(options: RunOptions): Promise<RunResult> {
   const waited = await waitWithTimeout(
     container.wait() as Promise<{ StatusCode: number }>,
     timeoutSecs * 1000
-  ).finally(() => clearInterval(statsTimer));
+  ).finally(() => {
+    statsStopped = true;
+    clearInterval(statsTimer);
+  });
 
   if (waited.timedOut) {
     console.log(`[${runId}] Container timed out, stopping...`);
@@ -633,12 +720,13 @@ export async function executeRun(options: RunOptions): Promise<RunResult> {
   };
 }
 
-/** Registry auth for docker pull */
-function getRegistryAuth():
-  | { authconfig?: { username: string; password: string; serveraddress: string } }
-  | undefined {
+/** Registry auth for docker pull (only sent when pulling from the configured registry host). */
+function getRegistryAuth(
+  image: string
+): { authconfig?: { username: string; password: string; serveraddress: string } } | undefined {
   if (!config.imageRegistry || !config.imageRegistryToken) return undefined;
   const serveraddress = config.imageRegistry.split('/')[0] || '';
+  if (!serveraddress || !image.startsWith(`${serveraddress}/`)) return undefined;
   return {
     authconfig: {
       username: config.imageRegistryUser || 'github',
@@ -706,8 +794,9 @@ export function followPull(modem: PullModem, stream: NodeJS.ReadableStream): Pro
 /**
  * Run `attempt` up to `delaysMs.length + 1` times, sleeping between tries.
  * Returns on the first success; throws the LAST error once retries are
- * exhausted. `onRetry` fires before each sleep with the attempt number and
- * the error that caused it. Exported for unit tests (docker-pull.test.ts).
+ * exhausted, `isAborted()` returns true, or `shouldRetry(err)` returns false.
+ * `onRetry` fires before each sleep with the attempt number and the error
+ * that caused it. Exported for unit tests (docker-pull.test.ts).
  */
 export async function pullWithRetries(
   attempt: () => Promise<void>,
@@ -716,6 +805,8 @@ export async function pullWithRetries(
     /** Abort check between attempts — a retry window must not extend an
      * aborted run's hold on its concurrency slot and memory headroom. */
     isAborted?: () => boolean;
+    /** Optional predicate to skip retries on permanent errors (404, 401, ENOSPC). */
+    shouldRetry?: (err: Error) => boolean;
     onRetry?: (attemptNo: number, err: Error) => void | Promise<void>;
     sleep?: (ms: number) => Promise<void>;
   }
@@ -726,86 +817,239 @@ export async function pullWithRetries(
       await attempt();
       return;
     } catch (err) {
-      if (i >= opts.delaysMs.length || opts.isAborted?.()) throw err;
-      await opts.onRetry?.(i + 1, err as Error);
+      const error = err instanceof Error ? err : new Error(String(err));
+      if (
+        i >= opts.delaysMs.length ||
+        opts.isAborted?.() ||
+        (opts.shouldRetry && !opts.shouldRetry(error))
+      ) {
+        throw err;
+      }
+      await opts.onRetry?.(i + 1, error);
       await sleep(opts.delaysMs[i] ?? 0);
     }
   }
 }
 
 /**
- * Pull Docker image if not already present.
- * When IMAGE_REGISTRY is configured, always pulls to get the latest version.
+ * Await a shared in-flight pull, waking early if this caller is aborted so
+ * the aborted run releases its concurrency slot without cancelling the pull
+ * for other active runs sharing the same image.
  */
-async function pullImageIfNeeded(
-  image: string,
-  runId: string,
+async function waitForPullOrAbort(
+  pullPromise: Promise<void>,
   isAborted?: () => boolean
 ): Promise<void> {
-  const isRegistryImage = config.imageRegistry && image.includes(config.imageRegistry);
+  if (!isAborted) return pullPromise;
+  if (isAborted()) return;
+  let timer: ReturnType<typeof setInterval> | undefined;
+  try {
+    await Promise.race([
+      pullPromise,
+      new Promise<void>((resolve) => {
+        timer = setInterval(() => {
+          if (isAborted()) resolve();
+        }, 250);
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer) clearInterval(timer);
+  }
+}
 
-  // For local images, skip pull if already present
-  if (!isRegistryImage) {
+export interface PullImageDeps {
+  dockerClient?: Pick<Docker, 'getImage' | 'pull' | 'modem'>;
+  now?: () => number;
+  policy?: ImagePullPolicy;
+  cacheTtlSecs?: number;
+  imageRegistry?: string;
+  log?: (runId: string, level: 'INFO' | 'WARN' | 'ERROR', message: string) => Promise<void>;
+  pullOnceFn?: (image: string) => Promise<void>;
+  retryDelaysMs?: number[];
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/**
+ * Pull Docker image if not already present / fresh.
+ *
+ * Optimizations over unconditional per-run pulls:
+ * 1. **Local / immutable skip**: local images and `@sha256:` digest refs skip
+ *    remote pulls whenever present locally (~2ms inspect).
+ * 2. **Smart TTL freshness cache (`IMAGE_PULL_POLICY=smart`, default 300s)**:
+ *    mutable registry tags (e.g. `:latest`) skip redundant registry round-trips
+ *    while fresh locally, and are immediately invalidated via Redis
+ *    `actor:image-updated` whenever an actor is pushed/updated.
+ *    Set `IMAGE_PULL_POLICY=if-not-present` to always use cached local images,
+ *    or `IMAGE_PULL_POLICY=always` to check the registry on every run.
+ * 3. **Singleflight deduplication**: concurrent runs for the same image share
+ *    a single `docker.pull()` instead of slamming dockerd & the registry with
+ *    N parallel multi-GB downloads.
+ * 4. **Fast-fail permanent errors**: 404/401/403/ENOSPC abort immediately
+ *    instead of burning 20s in retry backoff.
+ */
+export async function pullImageIfNeeded(
+  image: string,
+  runId: string,
+  isAborted?: () => boolean,
+  deps: PullImageDeps = {}
+): Promise<void> {
+  const client = deps.dockerClient ?? docker;
+  const now = deps.now ?? Date.now;
+  const policy = deps.policy ?? config.imagePullPolicy;
+  const cacheTtlSecs = deps.cacheTtlSecs ?? config.imagePullCacheTtlSecs;
+  const registry = deps.imageRegistry ?? config.imageRegistry;
+  const log = deps.log ?? writeLifecycleLog;
+  const retryDelaysMs = deps.retryDelaysMs ?? [5_000, 15_000];
+
+  // Track usage for LRU disk eviction even when pull is skipped.
+  imageLastUsedAt.set(image, now());
+
+  const isRegistryImage = isConfiguredRegistryImage(image, registry);
+  const immutable = isImmutableImageRef(image);
+  const lastPulled = imageLastPulledAt.get(image);
+  const isFresh =
+    cacheTtlSecs > 0 && lastPulled !== undefined && now() - lastPulled < cacheTtlSecs * 1000;
+
+  const canUseLocalCache =
+    !isRegistryImage ||
+    immutable ||
+    policy === 'if-not-present' ||
+    (policy === 'smart' && isFresh);
+
+  if (canUseLocalCache) {
     try {
-      await docker.getImage(image).inspect();
-      console.log(`Image ${image} already exists`);
-      await writeLifecycleLog(runId, 'INFO', `Image ${image} already exists locally`);
+      await client.getImage(image).inspect();
+      const reason = !isRegistryImage
+        ? 'already exists locally'
+        : immutable
+          ? 'immutable digest already exists locally'
+          : policy === 'if-not-present'
+            ? 'present locally (policy: if-not-present)'
+            : 'cached locally (fresh within pull TTL)';
+      console.log(`[${runId}] Image ${image} ${reason} — skipping pull`);
+      await log(runId, 'INFO', `Image ${image} ${reason}`);
       return;
     } catch {
-      // Image not found locally — will try to pull
+      // Image not found locally (e.g. evicted externally) — fall through to pull
+      imageLastPulledAt.delete(image);
     }
   }
 
-  // Pull image (always pull for registry images to get latest)
-  console.log(`Pulling image ${image}...`);
-  await writeLifecycleLog(runId, 'INFO', `Pulling image ${image}...`);
+  const waiterAbortCheck = isAborted ?? (() => false);
 
-  const auth = getRegistryAuth();
+  // Coalesce concurrent pulls for the exact same image ref (singleflight).
+  const existingPull = inFlightPulls.get(image);
+  if (existingPull) {
+    console.log(`[${runId}] Joining in-flight pull for ${image}...`);
+    await log(runId, 'INFO', `Waiting for in-flight image pull ${image}...`);
+    const waiters = inFlightWaiters.get(image);
+    waiters?.add(waiterAbortCheck);
+    try {
+      await waitForPullOrAbort(existingPull, isAborted);
+    } finally {
+      waiters?.delete(waiterAbortCheck);
+    }
+    imageLastUsedAt.set(image, now());
+    return;
+  }
 
-  const pullOnce = () =>
-    new Promise<void>((resolve, reject) => {
-      const pullOpts = auth || {};
-      void docker.pull(
-        image,
-        pullOpts,
-        (err: Error | null, stream: NodeJS.ReadableStream | undefined) => {
-          if (err) {
-            reject(err);
-            return;
+  // Start a new pull and publish the promise so concurrent runs coalesce onto it.
+  console.log(`[${runId}] Pulling image ${image}...`);
+  await log(runId, 'INFO', `Pulling image ${image}...`);
+
+  const auth = getRegistryAuth(image);
+  const pullOnce: (img: string) => Promise<void> =
+    deps.pullOnceFn ??
+    ((img: string) =>
+      new Promise<void>((resolve, reject) => {
+        const pullOpts = auth || {};
+        void client.pull(
+          img,
+          pullOpts,
+          (err: Error | null, stream: NodeJS.ReadableStream | undefined) => {
+            if (err) {
+              reject(err);
+              return;
+            }
+            if (!stream) {
+              reject(new Error('No stream returned from docker pull'));
+              return;
+            }
+
+            followPull(client.modem as PullModem, stream).then(resolve, reject);
           }
-          if (!stream) {
-            reject(new Error('No stream returned from docker pull'));
-            return;
-          }
+        );
+      }));
 
-          followPull(docker.modem as PullModem, stream).then(resolve, reject);
-        }
-      );
-    });
+  const waiters = new Set<() => boolean>([waiterAbortCheck]);
+  inFlightWaiters.set(image, waiters);
+  const allWaitersAborted = (): boolean =>
+    waiters.size === 0 || [...waiters].every((check) => check());
 
-  // Transient pulls failures are common exactly when it hurts most: a
-  // fleet scale-up cold-pulls the same multi-GB image on every new
-  // droplet at once (2026-07-16: 4 runs failed on mid-transfer pull
-  // errors and their input chunks were dropped for 24h — nothing
-  // upstream retries a run that died before its container existed).
-  // Two retries with backoff ride out registry/stream blips; a
-  // persistent failure (bad ref, auth) still fails the run with the
-  // real error surfaced by followPull.
-  await pullWithRetries(pullOnce, {
-    delaysMs: [5_000, 15_000],
-    isAborted,
-    onRetry: async (attemptNo, err) => {
-      console.warn(`[${runId}] Pull attempt ${String(attemptNo)} failed: ${err.message}`);
-      await writeLifecycleLog(
-        runId,
-        'WARN',
-        `Image pull attempt ${String(attemptNo)} failed (${err.message}); retrying...`
-      );
-    },
-  });
+  // Transient pull failures are common during fleet scale-up cold pulls.
+  // Two retries with backoff ride out registry/stream blips; permanent errors
+  // (404, 401, ENOSPC) fail fast via isRetryablePullError.
+  const pullPromise = (async () => {
+    try {
+      await pullWithRetries(() => pullOnce(image), {
+        delaysMs: retryDelaysMs,
+        isAborted: allWaitersAborted,
+        shouldRetry: isRetryablePullError,
+        sleep: deps.sleep,
+        onRetry: async (attemptNo, err) => {
+          console.warn(`[${runId}] Pull attempt ${String(attemptNo)} failed: ${err.message}`);
+          await log(
+            runId,
+            'WARN',
+            `Image pull attempt ${String(attemptNo)} failed (${err.message}); retrying...`
+          );
+        },
+      });
+      const ts = now();
+      imageLastPulledAt.set(image, ts);
+      imageLastUsedAt.set(image, ts);
+      console.log(`[${runId}] Image ${image} pulled successfully`);
+      await log(runId, 'INFO', `Image ${image} pulled successfully`);
+    } finally {
+      if (inFlightPulls.get(image) === pullPromise) {
+        inFlightPulls.delete(image);
+      }
+      if (inFlightWaiters.get(image) === waiters) {
+        inFlightWaiters.delete(image);
+      }
+    }
+  })();
 
-  console.log(`Image ${image} pulled successfully`);
-  await writeLifecycleLog(runId, 'INFO', `Image ${image} pulled successfully`);
+  // Prevent unhandled rejection if every waiter exits early via abort.
+  pullPromise.catch(() => undefined);
+  inFlightPulls.set(image, pullPromise);
+
+  try {
+    await waitForPullOrAbort(pullPromise, isAborted);
+  } finally {
+    waiters.delete(waiterAbortCheck);
+  }
+}
+
+/**
+ * Best-effort background pre-warming of configured images (`PREWARM_IMAGES`)
+ * on runner boot. Pulls sequentially to avoid saturating disk I/O at startup,
+ * and shares the singleflight map with live runs so a run arriving mid-prewarm
+ * seamlessly joins the download already in progress.
+ */
+export async function prewarmConfiguredImages(): Promise<void> {
+  if (config.prewarmImages.length === 0) return;
+  console.log(`[Prewarm] Pre-pulling ${String(config.prewarmImages.length)} configured image(s)...`);
+  for (const image of config.prewarmImages) {
+    try {
+      await pullImageIfNeeded(image, 'prewarm', undefined, {
+        log: async () => undefined,
+      });
+    } catch (err) {
+      console.warn(`[Prewarm] Failed to pre-pull ${image}: ${(err as Error).message}`);
+    }
+  }
 }
 
 /**
@@ -890,7 +1134,8 @@ export function buildActorEnv(options: {
 /**
  * Clean up Docker resources to free disk space.
  * Removes: stopped containers, dangling images, build cache — and, under
- * disk pressure, ALL unused tagged images.
+ * disk pressure, evicts least-recently-used unused registry image tags
+ * until disk usage drops below the target watermark.
  */
 export async function cleanupDocker(
   // Injectable seams for unit tests; production uses the module docker
@@ -932,33 +1177,11 @@ export async function cleanupDocker(
     // Prune build cache
     await client.pruneBuilder();
 
-    // Disk-pressure eviction of unused TAGGED images. Dangling-prune
-    // alone never shrinks this fleet: growth comes from new per-actor
-    // `:latest` tags (2.5-8.4GB each, browsers bundled), which filled
-    // both 80GB prod runner disks to 100% on 2026-08-04 while this
-    // cleanup ran faithfully every 30 minutes — every image pull then
-    // failed with "no space left on device" (104 runs). Evicted images
-    // re-pull on next claim (~1-2 min). Threshold sits BELOW the claim
-    // gate (diskClaimMaxPct) so eviction normally keeps the runner
-    // claimable and the gate stays a last resort.
-    //
-    // Eviction is scoped to tags under the configured IMAGE_REGISTRY
-    // prefix — the only images with a PROVEN re-pull path. A blanket
-    // `dangling:false` prune (docker image prune -a) would also remove
-    // (a) locally built images in the default no-registry deployment
-    // (crc push builds `crawlee-cloud/actor-NAME:latest` straight on the
-    // host daemon — eviction would be permanent, next pull 404s against
-    // Docker Hub), (b) custom `default_run_options.image` values that
-    // resolve locally even when a registry IS configured (queue.ts gives
-    // them priority over the registry-derived name), and (c) innocent
-    // bystanders on shared Docker hosts — the same blast-radius concern
-    // that keeps the container removal above label-scoped.
-    //
-    // Per-tag, non-forced remove: the daemon refuses images referenced
-    // by any container (running or stopped), so in-use images and a pull
-    // racing this sweep stay safe; multi-tag images just lose the
-    // registry tag. Registry-prefixed tags ARE the fleet's growth source,
-    // so this still solves the incident.
+    // Disk-pressure eviction of unused TAGGED registry images (LRU-ordered).
+    // Evicts oldest / least-recently-used registry tags first and stops once
+    // disk usage drops below the target watermark (diskEvictPct - 10%),
+    // preserving hot actor images on disk so they don't incur 1-2 minute
+    // multi-GB cold re-pulls on the very next run.
     const ratio = diskRatio();
     if (ratio * 100 >= config.diskEvictPct) {
       if (!config.imageRegistry) {
@@ -966,21 +1189,40 @@ export async function cleanupDocker(
           `[Cleanup] Disk ${String(Math.round(ratio * 100))}% full (>= ${String(config.diskEvictPct)}% eviction threshold) but no IMAGE_REGISTRY configured — skipping image eviction (locally built images cannot be re-pulled). Free disk space manually.`
         );
       } else {
-        const prefix = `${config.imageRegistry}/`;
+        const prefix = `${config.imageRegistry.replace(/\/+$/, '')}/`;
+        const targetPct = Math.max(0, config.diskEvictPct - 10);
         const images = await client.listImages();
-        let evictedTags = 0;
-        let evictedMb = 0;
+
+        // Collect candidate registry tags and sort least-recently-used first.
+        const candidates: Array<{ tag: string; size: number; lastUsedMs: number }> = [];
         for (const image of images) {
+          const createdMs = (image.Created || 0) * 1000;
           for (const tag of image.RepoTags ?? []) {
             if (!tag.startsWith(prefix)) continue;
-            try {
-              await client.getImage(tag).remove();
-              evictedTags++;
-              evictedMb += Math.round((image.Size || 0) / 1024 / 1024);
-            } catch {
-              // In use, shared, or already gone — the daemon is the
-              // authority; skip.
+            candidates.push({
+              tag,
+              size: image.Size || 0,
+              lastUsedMs: imageLastUsedAt.get(tag) ?? createdMs,
+            });
+          }
+        }
+        candidates.sort((a, b) => a.lastUsedMs - b.lastUsedMs);
+
+        let evictedTags = 0;
+        let evictedMb = 0;
+        for (const candidate of candidates) {
+          try {
+            await client.getImage(candidate.tag).remove();
+            imageLastPulledAt.delete(candidate.tag);
+            imageLastUsedAt.delete(candidate.tag);
+            evictedTags++;
+            evictedMb += Math.round(candidate.size / 1024 / 1024);
+            if (diskRatio() * 100 < targetPct) {
+              break;
             }
+          } catch {
+            // In use, shared, or already gone — the daemon is the
+            // authority; skip.
           }
         }
         console.log(

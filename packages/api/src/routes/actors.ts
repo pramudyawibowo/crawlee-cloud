@@ -112,6 +112,25 @@ async function findOrCreateActorVersion(
  * user's actual intent; a missing build row is a UI nicety, not a
  * correctness issue.
  */
+/**
+ * Notify runners via Redis that an actor image was updated/re-pushed so they
+ * immediately invalidate their pull freshness cache and fetch the new tag on
+ * the next run. Best-effort — must never break actor creation/update.
+ */
+async function notifyActorImageUpdated(
+  defaultRunOptions: unknown,
+  log: (msg: string) => void = () => undefined
+): Promise<void> {
+  if (!defaultRunOptions || typeof defaultRunOptions !== 'object') return;
+  const imageName = (defaultRunOptions as { image?: unknown }).image;
+  if (typeof imageName !== 'string' || imageName.length === 0) return;
+  try {
+    await redis.publish('actor:image-updated', imageName);
+  } catch (err) {
+    log(`notifyActorImageUpdated failed for ${imageName}: ${(err as Error).message}`);
+  }
+}
+
 async function recordBuildIfNew(
   actorId: string,
   defaultRunOptions: unknown,
@@ -295,12 +314,14 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
       );
 
       // Record the deploy if the CLI sent a new image reference.
+      const effectiveRunOptions = defaultRunOptions ?? existing.rows[0].default_run_options;
       await recordBuildIfNew(
         result.rows[0]!.id,
-        defaultRunOptions ?? existing.rows[0].default_run_options,
+        effectiveRunOptions,
         version,
         (m) => fastify.log.warn(m)
       );
+      await notifyActorImageUpdated(effectiveRunOptions, (m) => fastify.log.warn(m));
       return { data: formatActor(result.rows[0]!) };
     }
 
@@ -328,6 +349,7 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
     );
 
     await recordBuildIfNew(id, defaultRunOptions, version, (m) => fastify.log.warn(m));
+    await notifyActorImageUpdated(defaultRunOptions, (m) => fastify.log.warn(m));
     reply.status(201);
     return { data: formatActor(result.rows[0]!) };
   });
@@ -434,12 +456,14 @@ export const actorsRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     if (updates.defaultRunOptions !== undefined || updates.version !== undefined) {
+      const effectiveRunOptions = updates.defaultRunOptions ?? result.rows[0].default_run_options;
       await recordBuildIfNew(
         result.rows[0].id,
-        updates.defaultRunOptions ?? result.rows[0].default_run_options,
+        effectiveRunOptions,
         updates.version,
         (m) => fastify.log.warn(m)
       );
+      await notifyActorImageUpdated(effectiveRunOptions, (m) => fastify.log.warn(m));
     }
 
     return { data: formatActor(result.rows[0]) };
